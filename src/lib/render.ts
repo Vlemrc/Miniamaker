@@ -92,7 +92,8 @@ function drawShade(ctx: CanvasRenderingContext2D, t: Template) {
 // ——— Texte ———
 
 function setFont(ctx: CanvasRenderingContext2D, t: Typo, size: number, fonts: Fonts) {
-  ctx.font = `${t.italic ? "italic " : ""}${t.weight} ${size}px ${fonts[t.font]}`;
+  const family = t.family ? `"${t.family}", ${fonts[t.font]}` : fonts[t.font];
+  ctx.font = `${t.italic ? "italic " : ""}${t.weight} ${size}px ${family}`;
   ctx.letterSpacing = `${t.tracking * size}px`;
 }
 
@@ -122,7 +123,10 @@ function layout(ctx: CanvasRenderingContext2D, s: Scene, fonts: Fonts): Placed[]
   const placed: Placed[] = [];
   for (const [index, line] of s.lines.entries()) {
     if (!line.text.trim()) continue;
-    const typo = t.styles[line.style];
+    const style = t.styles[line.style];
+    // Police choisie sur la ligne : on garde la taille et la casse du style, pas l'interlettrage
+    // (réglé pour la police du template).
+    const typo: Typo = line.font ? { ...style, family: line.font.family, weight: line.font.weight, italic: line.font.italic, tracking: 0 } : style;
     const pad = line.style === "label" ? 0.5 : 0; // marge intérieure de l'étiquette, en em
     const ref = measure(ctx, line, typo, 100, fonts);
     const fitSize = t.width / (ref.w / 100 + pad * 2);

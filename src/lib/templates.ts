@@ -16,10 +16,12 @@ export type Line = {
   style: LineStyle;
   accent: boolean;
   dy?: number; // décalage vertical choisi en glissant la ligne dans l'aperçu
+  font?: { family: string; weight: number; italic: boolean }; // Google Font choisie à la place de celle du style
 };
 
 export type Typo = {
   font: FontRole;
+  family?: string; // Google Font qui remplace la police du rôle (choix par ligne)
   weight: number;
   italic?: boolean;
   size: number; // taille visée ; réduite si la ligne est trop longue

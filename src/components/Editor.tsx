@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { anton, instrumentSerif, interTight } from "@/lib/fonts";
+import FontPicker from "@/components/FontPicker";
+import { FONT_ROLE_NAME, anton, instrumentSerif, interTight } from "@/lib/fonts";
+import { GOOGLE_FONTS, loadGoogleFont } from "@/lib/googleFonts";
 import { frameTimes, grabFull, grabThumb, loadImage, loadVideo } from "@/lib/frames";
 import { clampCrop, drawGridOverlay, render, linePositions, renderMaskEditor, toSourcePoint, type Crop, type Fonts, type Scene, type Source } from "@/lib/render";
 import { CONCEPTS, type Concept } from "@/lib/concepts";
@@ -50,6 +52,8 @@ export default function Editor() {
   const [shade, setShade] = useState(true);
   const [boost, setBoost] = useState(true);
   const [showGrid, setShowGrid] = useState(true);
+  const [fontLine, setFontLine] = useState<number | null>(null);
+  const [fontsTick, setFontsTick] = useState(0);
   const [overText, setOverText] = useState(false);
   const [fontsReady, setFontsReady] = useState(false);
   const [depth, setDepth] = useState(false);
@@ -99,7 +103,18 @@ export default function Editor() {
     }
     render(ctx, scene, fonts);
     if (showGrid) drawGridOverlay(ctx);
-  }, [scene, showGrid, fonts, fontsReady, editingMask, source, crop, maskTick]);
+  }, [scene, showGrid, fonts, fontsReady, editingMask, source, crop, maskTick, fontsTick]);
+
+  // Google Fonts choisies sur les lignes : chargées à la demande, puis on redessine.
+  const lineFonts = JSON.stringify(lines.flatMap((l) => (l.font ? [l.font] : [])));
+  useEffect(() => {
+    for (const f of JSON.parse(lineFonts) as NonNullable<Line["font"]>[]) {
+      loadGoogleFont(f.family, f.weight, f.italic).then(
+        () => setFontsTick((t) => t + 1),
+        (e) => console.warn(e),
+      );
+    }
+  }, [lineFonts]);
 
   function applyConcept(c: Concept) {
     setConceptId(c.id);
@@ -215,6 +230,7 @@ export default function Editor() {
   const visible = showRejected ? sorted : good;
 
   async function exportImage(type: "image/jpeg" | "image/png") {
+    await Promise.all(lines.flatMap((l) => (l.font ? [loadGoogleFont(l.font.family, l.font.weight, l.font.italic)] : [])));
     await document.fonts.ready;
     const c = document.createElement("canvas");
     c.width = W;
@@ -539,13 +555,34 @@ export default function Editor() {
                     style={{ background: line.accent ? palette.accent : "#FFFFFF" }}
                   />
                   <button
-                    onClick={() => setLines((ls) => ls.filter((_, j) => j !== i))}
+                    onClick={() => {
+                      setLines((ls) => ls.filter((_, j) => j !== i));
+                      setFontLine(null);
+                    }}
                     title="Supprimer la ligne"
                     className="ml-1 px-1 text-sm text-white/35 hover:text-white"
                   >
                     ×
                   </button>
                 </div>
+                <LineFont
+                  line={line}
+                  templateFont={FONT_ROLE_NAME[template.styles[line.style].font]}
+                  open={fontLine === i}
+                  onToggle={() => setFontLine(fontLine === i ? null : i)}
+                  onChange={(font) => updateLine(i, { font })}
+                />
+                {fontLine === i && (
+                  <FontPicker
+                    value={line.font}
+                    templateFont={FONT_ROLE_NAME[template.styles[line.style].font]}
+                    templateWeight={template.styles[line.style].weight}
+                    onChange={(font) => {
+                      updateLine(i, { font });
+                      setFontLine(null);
+                    }}
+                  />
+                )}
               </div>
             ))}
           </div>
@@ -709,6 +746,63 @@ export default function Editor() {
         )}
       </section>
     </main>
+  );
+}
+
+// Police de la ligne : celle du template, ou une Google Font avec sa graisse et l'italique.
+function LineFont({
+  line,
+  templateFont,
+  open,
+  onToggle,
+  onChange,
+}: {
+  line: Line;
+  templateFont: string;
+  open: boolean;
+  onToggle: () => void;
+  onChange: (font: Line["font"]) => void;
+}) {
+  const gf = line.font && GOOGLE_FONTS.find((f) => f.f === line.font!.family);
+  return (
+    <div className="mt-2 flex items-center gap-1.5">
+      <button
+        onClick={onToggle}
+        className={`flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1 text-left text-xs transition ${
+          open ? "bg-white/15" : "bg-white/5 hover:bg-white/10"
+        }`}
+      >
+        <span className="text-white/40">Aa</span>
+        <span className="truncate" style={line.font ? { fontFamily: `"${line.font.family}", system-ui` } : undefined}>
+          {line.font ? line.font.family : `Police du template · ${templateFont}`}
+        </span>
+      </button>
+      {line.font && gf && (
+        <>
+          <select
+            value={line.font.weight}
+            onChange={(e) => onChange({ ...line.font!, weight: +e.target.value })}
+            title="Graisse"
+            className="rounded-md bg-white/5 px-1 py-1 text-xs outline-none"
+          >
+            {gf.w.map((w) => (
+              <option key={w} value={w} className="bg-neutral-900">
+                {w}
+              </option>
+            ))}
+          </select>
+          {gf.i && (
+            <button
+              onClick={() => onChange({ ...line.font!, italic: !line.font!.italic })}
+              title="Italique"
+              className={`rounded-md px-2 py-1 text-xs italic ${line.font.italic ? "bg-white/20" : "bg-white/5 text-white/50"}`}
+            >
+              I
+            </button>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 

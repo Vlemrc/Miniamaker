@@ -4,3 +4,5 @@ import { Anton, Instrument_Serif, Inter_Tight } from "next/font/google";
 export const interTight = Inter_Tight({ weight: ["600", "700", "800", "900"], subsets: ["latin"] });
 export const instrumentSerif = Instrument_Serif({ weight: "400", style: "italic", subsets: ["latin"] });
 export const anton = Anton({ weight: "400", subsets: ["latin"] });
+
+export const FONT_ROLE_NAME = { sans: "Inter Tight", serif: "Instrument Serif", condensed: "Anton" } as const;
