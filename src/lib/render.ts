@@ -12,6 +12,7 @@ export type Scene = {
   palette: Palette;
   align: Align;
   lines: Line[];
+  textOffset: number; // décalage vertical du bloc de texte, choisi en le glissant dans l'aperçu
   shade: boolean;
   boost: boolean;
 };
@@ -179,17 +180,29 @@ function drawLine(ctx: CanvasRenderingContext2D, s: Scene, p: Placed, top: numbe
 
 // ——— Rendu complet ———
 
+// Position du bloc de texte : ancrage du template + décalage choisi,
+// sans jamais sortir de la bande visible dans la grille du profil.
+export function textBlock(ctx: CanvasRenderingContext2D, s: Scene, fonts: Fonts) {
+  const t = s.template;
+  const placed = layout(ctx, s, fonts);
+  const height = placed.reduce((sum, p) => sum + p.h, 0);
+  const base = t.anchor === "bottom" ? t.anchorY - height : t.anchor === "center" ? t.anchorY - height / 2 : t.anchorY;
+  const min = SAFE.gridTop + 20 - base;
+  const max = Math.max(min, SAFE.gridBottom - 20 - height - base);
+  const offset = Math.max(min, Math.min(max, s.textOffset));
+  return { placed, top: base + offset, height, min, max };
+}
+
 export function render(ctx: CanvasRenderingContext2D, s: Scene, fonts: Fonts) {
   const t = s.template;
   ctx.clearRect(0, 0, W, H);
   drawSource(ctx, s.source, s.crop, s.boost);
   if (s.shade) drawShade(ctx, t);
 
-  const placed = layout(ctx, s, fonts);
-  const total = placed.reduce((sum, p) => sum + p.h, 0);
-  let top = t.anchor === "bottom" ? t.anchorY - total : t.anchor === "center" ? t.anchorY - total / 2 : t.anchorY;
+  const block = textBlock(ctx, s, fonts);
+  let top = block.top;
   ctx.save();
-  for (const p of placed) {
+  for (const p of block.placed) {
     drawLine(ctx, s, p, top, fonts);
     top += p.h;
   }
