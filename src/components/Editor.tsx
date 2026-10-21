@@ -116,9 +116,17 @@ export default function Editor() {
     }
   }, [lineFonts]);
 
+  // Changer de concept garde le texte déjà saisi : il est reversé, dans l'ordre, dans les lignes
+  // du nouveau concept (qui en impose les styles). Les étiquettes du concept (« Vrai ou faux ? »…)
+  // gardent leur texte ; les lignes sans texte affichent l'exemple du concept en indication.
   function applyConcept(c: Concept) {
     setConceptId(c.id);
-    setLines(c.lines.map((l) => ({ ...l })));
+    setLines((current) => {
+      const texts = current.filter((l) => l.style !== "label" && l.text.trim()).map((l) => l.text);
+      if (!texts.length) return c.lines.map((l) => ({ ...l }));
+      const next = c.lines.map((l) => (l.style === "label" ? { ...l } : { ...l, text: texts.shift() ?? "", hint: l.text }));
+      return [...next, ...texts.map((text) => ({ text, style: "normal" as const, accent: false }))];
+    });
     setTemplateId(c.template);
     setAlign(c.align);
     setDepth(c.template === "behind");
@@ -533,7 +541,7 @@ export default function Editor() {
                 <input
                   value={line.text}
                   onChange={(e) => updateLine(i, { text: e.target.value })}
-                  placeholder="Texte de la ligne"
+                  placeholder={line.hint ?? "Texte de la ligne"}
                   className="mb-2 w-full bg-transparent px-1 text-sm outline-none placeholder:text-white/30"
                 />
                 <div className="flex items-center gap-1">

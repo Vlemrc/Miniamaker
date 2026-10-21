@@ -17,6 +17,7 @@ export type Line = {
   accent: boolean;
   dy?: number; // décalage vertical choisi en glissant la ligne dans l'aperçu
   font?: { family: string; weight: number; italic: boolean }; // Google Font choisie à la place de celle du style
+  hint?: string; // exemple du concept, affiché quand la ligne est vide
 };
 
 export type Typo = {
