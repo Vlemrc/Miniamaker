@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { anton, instrumentSerif, interTight } from "@/lib/fonts";
 import { frameTimes, grabFull, grabThumb, loadImage, loadVideo } from "@/lib/frames";
-import { clampCrop, drawGridOverlay, render, textBlock, renderMaskEditor, toSourcePoint, type Crop, type Fonts, type Scene, type Source } from "@/lib/render";
+import { clampCrop, drawGridOverlay, render, linePositions, renderMaskEditor, toSourcePoint, type Crop, type Fonts, type Scene, type Source } from "@/lib/render";
 import { CONCEPTS, type Concept } from "@/lib/concepts";
 import { cutout } from "@/lib/segment";
 import { detectSubtitles, emptyMask, inpaint, preloadInpainting } from "@/lib/subtitles";
@@ -26,7 +26,7 @@ export default function Editor() {
   const loadId = useRef(0);
   const drag = useRef<
     | { kind: "image"; x: number; y: number; crop: Crop }
-    | { kind: "text"; y: number; offset: number; min: number; max: number }
+    | { kind: "line"; index: number; y: number; dy: number; min: number; max: number }
     | null
   >(null);
   const lastPaint = useRef<{ x: number; y: number } | null>(null);
@@ -50,7 +50,6 @@ export default function Editor() {
   const [shade, setShade] = useState(true);
   const [boost, setBoost] = useState(true);
   const [showGrid, setShowGrid] = useState(true);
-  const [textOffset, setTextOffset] = useState(0);
   const [overText, setOverText] = useState(false);
   const [fontsReady, setFontsReady] = useState(false);
   const [depth, setDepth] = useState(false);
@@ -78,8 +77,8 @@ export default function Editor() {
   const effectiveAlign = template.aligns.includes(align) ? align : template.aligns[0];
 
   const scene: Scene = useMemo(
-    () => ({ source: shown, subject: cut, crop, template, palette, align: effectiveAlign, lines, textOffset, shade, boost }),
-    [shown, cut, crop, template, palette, effectiveAlign, lines, textOffset, shade, boost],
+    () => ({ source: shown, subject: cut, crop, template, palette, align: effectiveAlign, lines, shade, boost }),
+    [shown, cut, crop, template, palette, effectiveAlign, lines, shade, boost],
   );
 
   useEffect(() => {
@@ -106,7 +105,6 @@ export default function Editor() {
     setConceptId(c.id);
     setLines(c.lines.map((l) => ({ ...l })));
     setTemplateId(c.template);
-    setTextOffset(0);
     setAlign(c.align);
     setDepth(c.template === "behind");
   }
@@ -288,15 +286,18 @@ export default function Editor() {
     setMaskTick((t) => t + 1);
   }
 
-  // ——— Souris dans l'aperçu : glisser le texte (verticalement) ou recadrer l'image ———
-  // Le bloc de texte sous le pointeur, en coordonnées canvas.
+  // ——— Souris dans l'aperçu : glisser une ligne (verticalement) ou recadrer l'image ———
+  // La ligne sous le pointeur (la dernière dessinée l'emporte si elles se chevauchent).
   function textHit(e: React.PointerEvent<HTMLCanvasElement>) {
     const ctx = canvasRef.current?.getContext("2d");
-    if (!ctx || !lines.some((l) => l.text.trim())) return null;
+    if (!ctx) return null;
     const r = e.currentTarget.getBoundingClientRect();
     const y = ((e.clientY - r.top) * H) / r.height;
-    const b = textBlock(ctx, scene, fonts);
-    return y >= b.top - 30 && y <= b.top + b.height + 30 ? b : null;
+    return linePositions(ctx, scene, fonts).findLast((l) => y >= l.top - 8 && y <= l.top + l.p.h + 8) ?? null;
+  }
+
+  function resetLinePositions() {
+    setLines((ls) => ls.map((l) => ({ ...l, dy: 0 })));
   }
 
   function onPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
@@ -306,10 +307,10 @@ export default function Editor() {
       paint(e);
       return;
     }
-    const b = textHit(e);
-    if (b) {
+    const hit = textHit(e);
+    if (hit) {
       e.currentTarget.setPointerCapture(e.pointerId);
-      drag.current = { kind: "text", y: e.clientY, offset: Math.max(b.min, Math.min(b.max, textOffset)), min: b.min, max: b.max };
+      drag.current = { kind: "line", index: hit.p.index, y: e.clientY, dy: hit.dy, min: hit.min, max: hit.max };
       return;
     }
     if (!source) return;
@@ -327,10 +328,10 @@ export default function Editor() {
       return;
     }
     const scale = W / e.currentTarget.clientWidth;
-    if (d.kind === "text") {
-      let offset = d.offset + (e.clientY - d.y) * scale;
-      if (Math.abs(offset) < 30) offset = 0; // aimant sur la position prévue par le template
-      setTextOffset(Math.max(d.min, Math.min(d.max, offset)));
+    if (d.kind === "line") {
+      let dy = d.dy + (e.clientY - d.y) * scale;
+      if (Math.abs(dy) < 30) dy = 0; // aimant sur la position prévue par le template
+      updateLine(d.index, { dy: Math.max(d.min, Math.min(d.max, dy)) });
       return;
     }
     setCrop(clampCrop(source, { ...d.crop, offX: d.crop.offX + (e.clientX - d.x) * scale, offY: d.crop.offY + (e.clientY - d.y) * scale }));
@@ -569,7 +570,7 @@ export default function Editor() {
                 key={t.id}
                 onClick={() => {
                   setTemplateId(t.id);
-                  setTextOffset(0);
+                  resetLinePositions();
                   // Le détourage n'a de sens que si le texte est derrière la tête.
                   setDepth(t.id === "behind");
                 }}
@@ -648,14 +649,14 @@ export default function Editor() {
               className="text-xs text-white/50 hover:text-white"
               onClick={() => {
                 setCrop(NO_CROP);
-                setTextOffset(0);
+                resetLinePositions();
               }}
             >
               Réinitialiser
             </button>
           </div>
           <p className="mt-1.5 text-xs text-white/40">
-            Dans l&apos;aperçu : glisse le texte pour le monter ou le descendre, glisse l&apos;image pour la recadrer.
+            Dans l&apos;aperçu : glisse une ligne de texte pour la monter ou la descendre, glisse l&apos;image pour la recadrer.
           </p>
         </Section>
       </aside>

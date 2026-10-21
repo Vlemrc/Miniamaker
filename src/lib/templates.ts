@@ -11,7 +11,12 @@ export type Align = "left" | "center" | "right";
 export type FontRole = "sans" | "serif" | "condensed";
 export type LineStyle = "normal" | "small" | "big" | "serif" | "label";
 
-export type Line = { text: string; style: LineStyle; accent: boolean };
+export type Line = {
+  text: string;
+  style: LineStyle;
+  accent: boolean;
+  dy?: number; // décalage vertical choisi en glissant la ligne dans l'aperçu
+};
 
 export type Typo = {
   font: FontRole;

@@ -12,13 +12,12 @@ export type Scene = {
   palette: Palette;
   align: Align;
   lines: Line[];
-  textOffset: number; // décalage vertical du bloc de texte, choisi en le glissant dans l'aperçu
   shade: boolean;
   boost: boolean;
 };
 
 type Word = { text: string; hl: boolean; w: number };
-type Placed = { line: Line; typo: Typo; size: number; words: Word[]; space: number; w: number; h: number; pad: number };
+type Placed = { index: number; line: Line; typo: Typo; size: number; words: Word[]; space: number; w: number; h: number; pad: number };
 
 // ——— Image ———
 
@@ -121,14 +120,14 @@ function measure(ctx: CanvasRenderingContext2D, line: Line, typo: Typo, size: nu
 function layout(ctx: CanvasRenderingContext2D, s: Scene, fonts: Fonts): Placed[] {
   const t = s.template;
   const placed: Placed[] = [];
-  for (const line of s.lines) {
+  for (const [index, line] of s.lines.entries()) {
     if (!line.text.trim()) continue;
     const typo = t.styles[line.style];
     const pad = line.style === "label" ? 0.5 : 0; // marge intérieure de l'étiquette, en em
     const ref = measure(ctx, line, typo, 100, fonts);
     const fitSize = t.width / (ref.w / 100 + pad * 2);
     const size = Math.min(typo.size, fitSize);
-    placed.push({ line, typo, size, pad, ...measure(ctx, line, typo, size, fonts), h: size * typo.lineHeight });
+    placed.push({ index, line, typo, size, pad, ...measure(ctx, line, typo, size, fonts), h: size * typo.lineHeight });
   }
   // Trop haut au total : on réduit tout proportionnellement.
   const total = placed.reduce((sum, p) => sum + p.h, 0);
@@ -180,17 +179,21 @@ function drawLine(ctx: CanvasRenderingContext2D, s: Scene, p: Placed, top: numbe
 
 // ——— Rendu complet ———
 
-// Position du bloc de texte : ancrage du template + décalage choisi,
-// sans jamais sortir de la bande visible dans la grille du profil.
-export function textBlock(ctx: CanvasRenderingContext2D, s: Scene, fonts: Fonts) {
+// Position de chaque ligne : empilées selon l'ancrage du template, puis décalées une à une
+// (glisser dans l'aperçu), sans jamais sortir de la bande visible dans la grille du profil.
+export function linePositions(ctx: CanvasRenderingContext2D, s: Scene, fonts: Fonts) {
   const t = s.template;
   const placed = layout(ctx, s, fonts);
   const height = placed.reduce((sum, p) => sum + p.h, 0);
-  const base = t.anchor === "bottom" ? t.anchorY - height : t.anchor === "center" ? t.anchorY - height / 2 : t.anchorY;
-  const min = SAFE.gridTop + 20 - base;
-  const max = Math.max(min, SAFE.gridBottom - 20 - height - base);
-  const offset = Math.max(min, Math.min(max, s.textOffset));
-  return { placed, top: base + offset, height, min, max };
+  let top = t.anchor === "bottom" ? t.anchorY - height : t.anchor === "center" ? t.anchorY - height / 2 : t.anchorY;
+  return placed.map((p) => {
+    const base = top;
+    top += p.h;
+    const min = SAFE.gridTop + 20 - base;
+    const max = Math.max(min, SAFE.gridBottom - 20 - p.h - base);
+    const dy = Math.max(min, Math.min(max, p.line.dy ?? 0));
+    return { p, top: base + dy, dy, min, max };
+  });
 }
 
 export function render(ctx: CanvasRenderingContext2D, s: Scene, fonts: Fonts) {
@@ -199,13 +202,8 @@ export function render(ctx: CanvasRenderingContext2D, s: Scene, fonts: Fonts) {
   drawSource(ctx, s.source, s.crop, s.boost);
   if (s.shade) drawShade(ctx, t);
 
-  const block = textBlock(ctx, s, fonts);
-  let top = block.top;
   ctx.save();
-  for (const p of block.placed) {
-    drawLine(ctx, s, p, top, fonts);
-    top += p.h;
-  }
+  for (const { p, top } of linePositions(ctx, s, fonts)) drawLine(ctx, s, p, top, fonts);
   ctx.restore();
 
   if (s.subject) drawSource(ctx, s.subject, s.crop, s.boost, true);
