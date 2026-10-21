@@ -1,0 +1,21 @@
+# Miniamaker
+
+Prototype d'outil pour produire des miniatures verticales (Reels, TikTok, Shorts) en série, toujours dans le même style.
+
+```bash
+npm install
+npm run dev
+```
+
+Puis ouvrir http://localhost:3000.
+
+## Fonctionnement
+
+- **Import** : vidéo ou image (bouton ou glisser-déposer). Tout est traité dans le navigateur, rien n'est envoyé en ligne.
+- **Choix de l'image** : 24 captures réparties sur la vidéo, triées par netteté et par la détection de visage MediaPipe (yeux fermés, bouche ouverte).
+- **Sous-titres incrustés** : `src/lib/subtitles.ts`. Détection automatique du texte blanc cerné de sombre (et des bandeaux blancs), masque retouchable au pinceau, puis reconstruction avec MI-GAN (modèle ONNX ~28 Mo, téléchargé une fois depuis Hugging Face puis gardé en cache, exécuté avec onnxruntime-web).
+- **Templates verrouillés** : `src/lib/templates.ts`. Positions, typos, tailles et effets sont figés ; l'utilisateur choisit le texte, la palette et l'alignement parmi les variantes prévues.
+- **Rendu** : `src/lib/render.ts`, canvas 1080 × 1920. La taille du titre s'ajuste toute seule à la zone.
+- **Export** : JPG ou PNG en 1080 × 1920, sans les repères (zones TikTok/Reels, grille Insta 3:4).
+
+Les wasm MediaPipe et onnxruntime sont copiés dans `public/` au `postinstall`. Le modèle de visage est chargé depuis les serveurs de Google ; sans réseau, le tri se fait seulement sur la netteté.
