@@ -2,20 +2,23 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import FontPicker from "@/components/FontPicker";
+import TemplateEditor from "@/components/TemplateEditor";
 import { FONT_ROLE_NAME, anton, instrumentSerif, interTight } from "@/lib/fonts";
 import { GOOGLE_FONTS, loadGoogleFont } from "@/lib/googleFonts";
 import { frameTimes, grabFull, grabThumb, loadImage, loadVideo } from "@/lib/frames";
-import { clampCrop, drawGridOverlay, render, linePositions, renderMaskEditor, toSourcePoint, type Crop, type Fonts, type Scene, type Source } from "@/lib/render";
-import { CONCEPTS, type Concept } from "@/lib/concepts";
+import { clampCrop, drawGridOverlay, drawZoneOverlay, render, linePositions, zoneRect, renderMaskEditor, toSourcePoint, type Crop, type Fonts, type Scene, type Source } from "@/lib/render";
+import type { Concept } from "@/lib/concepts";
+import { HISTORY_MAX, cleanLines, demoKit, storage, uid, type HistoryItem, type Kit } from "@/lib/kits";
 import { cutout } from "@/lib/segment";
 import { detectSubtitles, emptyMask, inpaint, preloadInpainting } from "@/lib/subtitles";
 import { FLAG_LABEL, analyze, preloadDetector, rank, type Analysis, type Scored } from "@/lib/scoring";
-import { DEFAULT_LINES, H, LINE_STYLE_LABEL, PALETTES, TEMPLATES, W, type Align, type Line, type LineStyle, type Palette } from "@/lib/templates";
+import { DEFAULT_LINES, H, LINE_STYLE_LABEL, PALETTES, TEMPLATES, W, type Align, type Line, type LineStyle, type Palette, type Template } from "@/lib/templates";
 
 const FRAME_COUNT = 24;
 const NO_CROP: Crop = { zoom: 1, offX: 0, offY: 0 };
 
 type Frame = Scored & { t: number; thumb: string };
+type ZoneMode = "move" | "left" | "right";
 
 const ALIGN_LABEL: Record<Align, string> = { left: "Gauche", center: "Centre", right: "Droite" };
 
@@ -29,6 +32,7 @@ export default function Editor() {
   const drag = useRef<
     | { kind: "image"; x: number; y: number; crop: Crop }
     | { kind: "line"; index: number; y: number; dy: number; min: number; max: number }
+    | { kind: "zone"; mode: ZoneMode; x: number; y: number; t: Template }
     | null
   >(null);
   const lastPaint = useRef<{ x: number; y: number } | null>(null);
@@ -59,6 +63,14 @@ export default function Editor() {
   const [depth, setDepth] = useState(false);
   const [conceptId, setConceptId] = useState<string | null>(null);
   const [subject, setSubject] = useState<{ of: Source; cut: Source } | null>(null);
+
+  // Kits de marque, brouillon et historique : sauvegardés localement.
+  const [kits, setKits] = useState<Kit[]>(() => [demoKit()]);
+  const [kitId, setKitId] = useState("demo");
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [editingTemplate, setEditingTemplate] = useState(false);
+  const [overZone, setOverZone] = useState<ZoneMode | null>(null);
   const [segError, setSegError] = useState("");
 
   // Effacement des sous-titres. Liés à l'image d'origine : changer d'image les invalide.
@@ -69,7 +81,8 @@ export default function Editor() {
   const [cleaning, setCleaning] = useState(false);
   const [cleanError, setCleanError] = useState("");
 
-  const template = TEMPLATES.find((t) => t.id === templateId)!;
+  const kit = kits.find((k) => k.id === kitId) ?? kits[0];
+  const template = kit.templates.find((t) => t.id === templateId) ?? kit.templates[0];
   const fonts: Fonts = useMemo(
     () => ({ sans: interTight.style.fontFamily, serif: instrumentSerif.style.fontFamily, condensed: anton.style.fontFamily }),
     [],
@@ -103,10 +116,14 @@ export default function Editor() {
     }
     render(ctx, scene, fonts);
     if (showGrid) drawGridOverlay(ctx);
-  }, [scene, showGrid, fonts, fontsReady, editingMask, source, crop, maskTick, fontsTick]);
+    if (editingTemplate) drawZoneOverlay(ctx, template);
+  }, [scene, showGrid, fonts, fontsReady, editingMask, source, crop, maskTick, fontsTick, editingTemplate, template]);
 
-  // Google Fonts choisies sur les lignes : chargées à la demande, puis on redessine.
-  const lineFonts = JSON.stringify(lines.flatMap((l) => (l.font ? [l.font] : [])));
+  // Google Fonts choisies sur les lignes ou dans le template : chargées à la demande, puis on redessine.
+  const lineFonts = JSON.stringify([
+    ...lines.flatMap((l) => (l.font ? [l.font] : [])),
+    ...Object.values(template.styles).flatMap((st) => (st.family ? [{ family: st.family, weight: st.weight, italic: !!st.italic }] : [])),
+  ]);
   useEffect(() => {
     for (const f of JSON.parse(lineFonts) as NonNullable<Line["font"]>[]) {
       loadGoogleFont(f.family, f.weight, f.italic).then(
@@ -129,7 +146,138 @@ export default function Editor() {
     });
     setTemplateId(c.template);
     setAlign(c.align);
-    setDepth(c.template === "behind");
+    setDepth(!!kit.templates.find((t) => t.id === c.template)?.subjectInFront);
+    setEditingTemplate(false);
+  }
+
+  // ——— Kits, sauvegarde et historique ———
+
+  // Au premier affichage : on reprend les kits, le brouillon et l'historique enregistrés.
+  useEffect(() => {
+    const savedKits = storage.loadKits();
+    if (savedKits?.length) setKits(savedKits);
+    const d = storage.loadDraft();
+    if (d) {
+      setKitId(d.kitId);
+      setLines(d.lines);
+      setTemplateId(d.templateId);
+      setAlign(d.align);
+      setPalette(d.palette);
+      setShade(d.shade);
+      setBoost(d.boost);
+      setConceptId(d.conceptId);
+    }
+    setHistory(storage.loadHistory() ?? []);
+    setLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (loaded) storage.saveKits(kits);
+  }, [kits, loaded]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const id = setTimeout(
+      () => storage.saveDraft({ kitId, lines, templateId, align, palette, shade, boost, conceptId }),
+      300,
+    );
+    return () => clearTimeout(id);
+  }, [loaded, kitId, lines, templateId, align, palette, shade, boost, conceptId]);
+
+  useEffect(() => {
+    if (loaded) storage.saveHistory(history);
+  }, [history, loaded]);
+
+  function updateKit(fn: (k: Kit) => Kit) {
+    setKits((ks) => ks.map((k) => (k.id === kit.id ? fn(k) : k)));
+  }
+
+  function selectKit(id: string) {
+    const k = kits.find((x) => x.id === id);
+    if (!k) return;
+    setKitId(id);
+    setTemplateId(k.templates[0].id);
+    setPalette(k.colors[0] ?? PALETTES[0]);
+    setConceptId(null);
+    setEditingTemplate(false);
+  }
+
+  function newKit() {
+    const name = prompt("Nom du nouveau kit (ex. le nom du client) :", "Nouveau client");
+    if (!name?.trim()) return;
+    // On part d'une copie du kit actuel : plus rapide que de tout refaire.
+    const k: Kit = { ...structuredClone(kit), id: uid(), name: name.trim() };
+    setKits((ks) => [...ks, k]);
+    setKitId(k.id);
+  }
+
+  function renameKit() {
+    const name = prompt("Nouveau nom du kit :", kit.name);
+    if (name?.trim()) updateKit((k) => ({ ...k, name: name.trim() }));
+  }
+
+  function deleteKit() {
+    if (kits.length < 2 || !confirm(`Supprimer le kit « ${kit.name} » ? Ses templates, couleurs et concepts seront perdus.`)) return;
+    const rest = kits.filter((k) => k.id !== kit.id);
+    setKits(rest);
+    selectKit(rest[0].id);
+    setKitId(rest[0].id);
+  }
+
+  function selectTemplate(t: Template) {
+    setTemplateId(t.id);
+    resetLinePositions();
+    setDepth(!!t.subjectInFront);
+  }
+
+  function updateTemplate(t: Template) {
+    updateKit((k) => ({ ...k, templates: k.templates.map((x) => (x.id === t.id ? t : x)) }));
+  }
+
+  function duplicateTemplate() {
+    const t: Template = { ...structuredClone(template), id: uid(), name: `${template.name} (copie)` };
+    updateKit((k) => ({ ...k, templates: [...k.templates, t] }));
+    setTemplateId(t.id);
+  }
+
+  function deleteTemplate() {
+    if (kit.templates.length < 2 || !confirm(`Supprimer le template « ${template.name} » ?`)) return;
+    const rest = kit.templates.filter((t) => t.id !== template.id);
+    updateKit((k) => ({ ...k, templates: rest }));
+    setTemplateId(rest[0].id);
+    setEditingTemplate(false);
+  }
+
+  function saveConcept() {
+    const name = prompt("Nom du concept (ex. « Vrai ou faux ») :");
+    if (!name?.trim()) return;
+    const c: Concept = { id: uid(), name: name.trim(), template: template.id, align: effectiveAlign, lines: cleanLines(lines) };
+    updateKit((k) => ({ ...k, concepts: [...k.concepts, c] }));
+    setConceptId(c.id);
+  }
+
+  function deleteConcept(c: Concept) {
+    if (!confirm(`Supprimer le concept « ${c.name} » ?`)) return;
+    updateKit((k) => ({ ...k, concepts: k.concepts.filter((x) => x.id !== c.id) }));
+  }
+
+  function addColor(hex: string) {
+    const p: Palette = { id: uid(), name: hex, text: "#FFFFFF", accent: hex.toUpperCase() };
+    updateKit((k) => ({ ...k, colors: [...k.colors, p] }));
+    setPalette(p);
+  }
+
+  function deleteColor(p: Palette) {
+    updateKit((k) => ({ ...k, colors: k.colors.filter((x) => x.id !== p.id) }));
+  }
+
+  function restoreFromHistory(h: HistoryItem) {
+    if (kits.some((k) => k.id === h.kitId)) setKitId(h.kitId);
+    setTemplateId(h.templateId);
+    setAlign(h.align);
+    setPalette(h.palette);
+    setLines(h.lines.map((l) => ({ ...l })));
+    setConceptId(null);
   }
 
   function updateLine(i: number, patch: Partial<Line>) {
@@ -246,6 +394,23 @@ export default function Editor() {
     render(c.getContext("2d")!, scene, fonts);
     const blob = await new Promise<Blob | null>((r) => c.toBlob(r, type, 0.93));
     if (!blob) return;
+
+    // Vignette pour l'historique.
+    const thumb = document.createElement("canvas");
+    thumb.width = 216;
+    thumb.height = 384;
+    thumb.getContext("2d")!.drawImage(c, 0, 0, thumb.width, thumb.height);
+    const item: HistoryItem = {
+      id: uid(),
+      date: Date.now(),
+      thumb: thumb.toDataURL("image/jpeg", 0.7),
+      kitId: kit.id,
+      templateId: template.id,
+      align: effectiveAlign,
+      palette,
+      lines: cleanLines(lines),
+    };
+    setHistory((hs) => [item, ...hs].slice(0, HISTORY_MAX));
     const slug =
       lines
         .map((l) => l.text)
@@ -324,12 +489,32 @@ export default function Editor() {
     setLines((ls) => ls.map((l) => ({ ...l, dy: 0 })));
   }
 
+  // Éditeur de templates : la zone de texte sous le pointeur (déplacer ou tirer un bord).
+  function zoneHit(e: React.PointerEvent<HTMLCanvasElement>): ZoneMode | null {
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - r.left) * W) / r.width;
+    const y = ((e.clientY - r.top) * H) / r.height;
+    const z = zoneRect(template);
+    if (y < z.y || y > z.y + z.h || x < z.x - 30 || x > z.x + z.w + 30) return null;
+    if (Math.abs(x - z.x) < 30) return "left";
+    if (Math.abs(x - (z.x + z.w)) < 30) return "right";
+    return "move";
+  }
+
   function onPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
     if (editingMask) {
       e.currentTarget.setPointerCapture(e.pointerId);
       lastPaint.current = null;
       paint(e);
       return;
+    }
+    if (editingTemplate) {
+      const mode = zoneHit(e);
+      if (mode) {
+        e.currentTarget.setPointerCapture(e.pointerId);
+        drag.current = { kind: "zone", mode, x: e.clientX, y: e.clientY, t: template };
+        return;
+      }
     }
     const hit = textHit(e);
     if (hit) {
@@ -348,10 +533,25 @@ export default function Editor() {
     }
     const d = drag.current;
     if (!d) {
-      setOverText(!!textHit(e));
+      setOverZone(editingTemplate ? zoneHit(e) : null);
+      setOverText(!editingTemplate && !!textHit(e));
       return;
     }
     const scale = W / e.currentTarget.clientWidth;
+    if (d.kind === "zone") {
+      const dx = Math.round((e.clientX - d.x) * scale);
+      const dy = Math.round((e.clientY - d.y) * scale);
+      const t = d.t;
+      if (d.mode === "move") {
+        updateTemplate({ ...t, x: Math.max(0, Math.min(W - t.width, t.x + dx)), anchorY: Math.max(0, Math.min(H, t.anchorY + dy)) });
+      } else if (d.mode === "left") {
+        const x = Math.max(0, Math.min(t.x + t.width - 200, t.x + dx));
+        updateTemplate({ ...t, x, width: t.x + t.width - x });
+      } else {
+        updateTemplate({ ...t, width: Math.max(200, Math.min(W - t.x, t.width + dx)) });
+      }
+      return;
+    }
     if (d.kind === "line") {
       let dy = d.dy + (e.clientY - d.y) * scale;
       if (Math.abs(dy) < 30) dy = 0; // aimant sur la position prévue par le template
@@ -381,9 +581,36 @@ export default function Editor() {
     >
       {/* ——— Panneau de contrôle ——— */}
       <aside className="w-[420px] shrink-0 overflow-y-auto border-r border-white/10 bg-[#111114] px-6 py-6">
-        <div className="mb-7 flex items-baseline justify-between">
+        <div className="mb-4 flex items-baseline justify-between">
           <h1 className="text-lg font-semibold tracking-tight">Miniamaker</h1>
-          <span className="text-xs text-white/40">Prototype · 9:16</span>
+          <span className="text-xs text-white/40">9:16</span>
+        </div>
+
+        {/* Kit de marque actif */}
+        <div className="mb-7 flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.03] p-1.5">
+          <span className="pl-1.5 text-[11px] uppercase tracking-wider text-white/35">Kit</span>
+          <select
+            value={kit.id}
+            onChange={(e) => selectKit(e.target.value)}
+            className="min-w-0 flex-1 rounded-md bg-transparent px-1 py-1 text-sm font-medium outline-none"
+          >
+            {kits.map((k) => (
+              <option key={k.id} value={k.id} className="bg-neutral-900">
+                {k.name}
+              </option>
+            ))}
+          </select>
+          <IconBtn title="Nouveau kit (copie de celui-ci)" onClick={newKit}>
+            +
+          </IconBtn>
+          <IconBtn title="Renommer le kit" onClick={renameKit}>
+            ✎
+          </IconBtn>
+          {kits.length > 1 && (
+            <IconBtn title="Supprimer le kit" onClick={deleteKit}>
+              ×
+            </IconBtn>
+          )}
         </div>
 
         <Section n={1} title="Source">
@@ -519,19 +746,34 @@ export default function Editor() {
 
         <Section n={step} title="Concept">
           <div className="flex flex-wrap gap-1.5">
-            {CONCEPTS.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => applyConcept(c)}
-                className={`rounded-full border px-3 py-1.5 text-xs transition ${
-                  c.id === conceptId ? "border-white bg-white text-black" : "border-white/10 text-white/70 hover:border-white/30 hover:text-white"
-                }`}
-              >
-                {c.name}
-              </button>
+            {kit.concepts.map((c) => (
+              <span key={c.id} className="group relative">
+                <button
+                  onClick={() => applyConcept(c)}
+                  className={`rounded-full border px-3 py-1.5 text-xs transition ${
+                    c.id === conceptId ? "border-white bg-white text-black" : "border-white/10 text-white/70 hover:border-white/30 hover:text-white"
+                  }`}
+                >
+                  {c.name}
+                </button>
+                <button
+                  onClick={() => deleteConcept(c)}
+                  title="Supprimer le concept"
+                  className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-neutral-700 text-[10px] leading-none text-white group-hover:flex"
+                >
+                  ×
+                </button>
+              </span>
             ))}
+            <button
+              onClick={saveConcept}
+              title="Enregistre le texte, les styles et le template actuels comme concept du kit"
+              className="rounded-full border border-dashed border-white/20 px-3 py-1.5 text-xs text-white/50 hover:border-white/40 hover:text-white"
+            >
+              + Enregistrer l&apos;actuel
+            </button>
           </div>
-          <p className="mt-2 text-xs text-white/40">Pré-remplit la structure du texte et le template. Remplace ensuite le texte d&apos;exemple.</p>
+          <p className="mt-2 text-xs text-white/40">Applique une structure de texte et un template. Ton texte est conservé.</p>
         </Section>
 
         <Section n={step + 1} title="Texte">
@@ -609,25 +851,38 @@ export default function Editor() {
         </Section>
 
         <Section n={step + 2} title="Style">
-          <div className="mb-4 grid grid-cols-2 gap-2">
-            {TEMPLATES.map((t) => (
+          <div className="mb-2 grid grid-cols-2 gap-2">
+            {kit.templates.map((t) => (
               <button
                 key={t.id}
-                onClick={() => {
-                  setTemplateId(t.id);
-                  resetLinePositions();
-                  // Le détourage n'a de sens que si le texte est derrière la tête.
-                  setDepth(t.id === "behind");
-                }}
+                onClick={() => selectTemplate(t)}
                 title={t.description}
-                className={`rounded-lg border px-2 py-2.5 text-xs transition ${
-                  t.id === templateId ? "border-white bg-white text-black" : "border-white/10 hover:border-white/30"
+                className={`truncate rounded-lg border px-2 py-2.5 text-xs transition ${
+                  t.id === template.id ? "border-white bg-white text-black" : "border-white/10 hover:border-white/30"
                 }`}
               >
                 {t.name}
               </button>
             ))}
           </div>
+          {editingTemplate ? (
+            <div className="mb-4">
+              <TemplateEditor
+                template={template}
+                onChange={updateTemplate}
+                onDuplicate={duplicateTemplate}
+                onDelete={kit.templates.length > 1 ? deleteTemplate : null}
+                onClose={() => setEditingTemplate(false)}
+              />
+            </div>
+          ) : (
+            <button
+              onClick={() => setEditingTemplate(true)}
+              className="mb-4 w-full rounded-lg border border-white/10 py-2 text-xs text-white/60 hover:border-white/30 hover:text-white"
+            >
+              Modifier le template « {template.name} »
+            </button>
+          )}
 
           <div className="mb-4 flex rounded-lg bg-white/5 p-1">
             {template.aligns.map((a) => (
@@ -641,32 +896,29 @@ export default function Editor() {
             ))}
           </div>
 
-          <div className="mb-4 flex items-center gap-2">
-            {PALETTES.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => setPalette(p)}
-                title={p.name}
-                className={`h-8 w-8 rounded-full ring-2 ring-offset-2 ring-offset-[#111114] transition ${
-                  palette.id === p.id ? "ring-white" : "ring-transparent"
-                }`}
-                style={{ background: p.accent }}
-              />
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            {kit.colors.map((p) => (
+              <span key={p.id} className="group relative">
+                <button
+                  onClick={() => setPalette(p)}
+                  title={p.name}
+                  className={`block h-8 w-8 rounded-full ring-2 ring-offset-2 ring-offset-[#111114] transition ${
+                    palette.id === p.id ? "ring-white" : "ring-transparent"
+                  }`}
+                  style={{ background: p.accent }}
+                />
+                {kit.colors.length > 1 && (
+                  <button
+                    onClick={() => deleteColor(p)}
+                    title="Retirer la couleur du kit"
+                    className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 items-center justify-center rounded-full bg-neutral-700 text-[10px] leading-none text-white group-hover:flex"
+                  >
+                    ×
+                  </button>
+                )}
+              </span>
             ))}
-            <label
-              title="Couleur du client"
-              className={`relative h-8 w-8 cursor-pointer overflow-hidden rounded-full ring-2 ring-offset-2 ring-offset-[#111114] ${
-                palette.id === "custom" ? "ring-white" : "ring-transparent"
-              }`}
-              style={{ background: palette.id === "custom" ? palette.accent : "conic-gradient(red, yellow, lime, cyan, blue, magenta, red)" }}
-            >
-              <input
-                type="color"
-                className="absolute inset-0 opacity-0"
-                value={palette.accent}
-                onChange={(e) => setPalette({ id: "custom", name: "Perso", text: "#FFFFFF", accent: e.target.value.toUpperCase() })}
-              />
-            </label>
+            <ColorAdder onAdd={addColor} />
           </div>
 
           <div className="space-y-2">
@@ -704,6 +956,33 @@ export default function Editor() {
             Dans l&apos;aperçu : glisse une ligne de texte pour la monter ou la descendre, glisse l&apos;image pour la recadrer.
           </p>
         </Section>
+
+        {history.length > 0 && (
+          <Section n={step + 4} title="Dernières minis">
+            <div className="grid grid-cols-4 gap-2">
+              {history.map((h) => (
+                <span key={h.id} className="group relative">
+                  <button
+                    onClick={() => restoreFromHistory(h)}
+                    title={`Reprendre ce texte et ces réglages · ${new Date(h.date).toLocaleString("fr-FR")}`}
+                    className="block aspect-[9/16] w-full overflow-hidden rounded-lg ring-2 ring-transparent transition hover:ring-white/40"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={h.thumb} alt="" className="h-full w-full object-cover" />
+                  </button>
+                  <button
+                    onClick={() => setHistory((hs) => hs.filter((x) => x.id !== h.id))}
+                    title="Retirer de l'historique"
+                    className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 items-center justify-center rounded-full bg-neutral-700 text-[10px] leading-none text-white group-hover:flex"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+            <p className="mt-2 text-xs text-white/40">Clique sur une mini pour reprendre son texte et ses réglages (pas l&apos;image).</p>
+          </Section>
+        )}
       </aside>
 
       {/* ——— Aperçu ——— */}
@@ -740,9 +1019,22 @@ export default function Editor() {
             }}
             onWheel={(e) => source && setZoom(Math.max(1, Math.min(2.5, crop.zoom - e.deltaY * 0.002)))}
             style={{ width: stage.w, height: stage.h }}
-            onPointerLeave={() => setOverText(false)}
+            onPointerLeave={() => {
+              setOverText(false);
+              setOverZone(null);
+            }}
             className={`rounded-2xl shadow-2xl shadow-black/60 ${
-              editingMask ? "cursor-crosshair" : overText ? "cursor-ns-resize" : source ? "cursor-grab active:cursor-grabbing" : ""
+              editingMask
+                ? "cursor-crosshair"
+                : overZone === "move"
+                  ? "cursor-move"
+                  : overZone
+                    ? "cursor-ew-resize"
+                    : overText
+                      ? "cursor-ns-resize"
+                      : source
+                        ? "cursor-grab active:cursor-grabbing"
+                        : ""
             }`}
           />
         </div>
@@ -811,6 +1103,38 @@ function LineFont({
         </>
       )}
     </div>
+  );
+}
+
+function IconBtn({ title, onClick, children }: { title: string; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button onClick={onClick} title={title} className="h-7 w-7 shrink-0 rounded-md text-sm text-white/50 hover:bg-white/10 hover:text-white">
+      {children}
+    </button>
+  );
+}
+
+// Ajoute une couleur au kit : on choisit dans le sélecteur, elle est ajoutée quand on le valide
+// (événement natif « change », pas l'« input » continu que React appelle onChange).
+function ColorAdder({ onAdd }: { onAdd: (hex: string) => void }) {
+  const [value, setValue] = useState("#FF5CC8");
+  const ref = useRef<HTMLInputElement>(null);
+  const addRef = useRef(onAdd);
+  addRef.current = onAdd;
+  useEffect(() => {
+    const el = ref.current;
+    const commit = () => el && addRef.current(el.value);
+    el?.addEventListener("change", commit);
+    return () => el?.removeEventListener("change", commit);
+  }, []);
+  return (
+    <label
+      title="Ajouter une couleur au kit"
+      className="relative flex h-8 w-8 cursor-pointer items-center justify-center overflow-hidden rounded-full border border-dashed border-white/30 text-sm text-white/60 hover:border-white/60"
+    >
+      +
+      <input ref={ref} type="color" className="absolute inset-0 opacity-0" value={value} onChange={(e) => setValue(e.target.value)} />
+    </label>
   );
 }
 

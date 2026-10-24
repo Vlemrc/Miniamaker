@@ -238,3 +238,34 @@ function label(ctx: CanvasRenderingContext2D, text: string, x: number, y: number
   ctx.fillStyle = "#fff";
   ctx.fillText(text, x, y);
 }
+
+// Zone de texte d'un template (rectangle où le bloc de texte peut s'étendre).
+export function zoneRect(t: Template) {
+  const top = t.anchor === "top" ? t.anchorY : t.anchor === "center" ? t.anchorY - t.maxHeight / 2 : t.anchorY - t.maxHeight;
+  return { x: t.x, y: top, w: t.width, h: t.maxHeight };
+}
+
+// Repère de l'éditeur de templates : la zone, sa ligne d'ancrage et ses poignées.
+export function drawZoneOverlay(ctx: CanvasRenderingContext2D, t: Template) {
+  const z = zoneRect(t);
+  ctx.save();
+  ctx.fillStyle = "rgba(77,141,255,0.10)";
+  ctx.fillRect(z.x, z.y, z.w, z.h);
+  ctx.setLineDash([14, 10]);
+  ctx.strokeStyle = "rgba(77,141,255,0.95)";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(z.x, z.y, z.w, z.h);
+  ctx.setLineDash([]);
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(z.x, t.anchorY);
+  ctx.lineTo(z.x + z.w, t.anchorY);
+  ctx.stroke();
+  ctx.fillStyle = "rgba(77,141,255,1)";
+  for (const hx of [z.x, z.x + z.w]) {
+    ctx.beginPath();
+    ctx.roundRect(hx - 9, z.y + z.h / 2 - 40, 18, 80, 9);
+    ctx.fill();
+  }
+  ctx.restore();
+}

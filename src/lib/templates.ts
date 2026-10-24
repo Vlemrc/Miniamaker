@@ -1,7 +1,6 @@
-// Templates verrouillés : tout ce qui fait la « patte » est figé ici.
-// Le texte est saisi ligne par ligne ; chaque ligne prend un des styles prévus par le template
-// (taille, typo, graisse…). L'utilisateur ne choisit que le texte, le style de ligne,
-// la couleur et une des variantes d'alignement autorisées.
+// Templates : la mise en page qui fait la « patte » (zone de texte, styles de ligne, dégradé…).
+// Ceux d'ici servent de point de départ au kit de démo ; chaque kit les modifie librement
+// dans l'éditeur de templates.
 // Coordonnées en pixels sur un canvas 1080 × 1920 (9:16).
 
 export const W = 1080;
@@ -45,6 +44,7 @@ export type Template = {
   shade: { from: "top" | "bottom"; size: number; opacity: number };
   shadow: number; // flou de l'ombre portée du texte, en fraction de la taille
   aligns: Align[];
+  subjectInFront?: boolean; // active le détourage : la personne passe devant le texte
 };
 
 export type Palette = { id: string; name: string; text: string; accent: string };
@@ -145,6 +145,7 @@ export const TEMPLATES: Template[] = [
     shade: { from: "top", size: 900, opacity: 0.55 },
     shadow: 0.08,
     aligns: ["center"],
+    subjectInFront: true,
   },
 ];
 

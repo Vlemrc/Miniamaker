@@ -11,9 +11,10 @@ type Props = {
   templateFont: string; // nom de la police prévue par le style de la ligne
   templateWeight: number;
   onChange: (font: Line["font"]) => void;
+  defaultLabel?: string;
 };
 
-export default function FontPicker({ value, templateFont, templateWeight, onChange }: Props) {
+export default function FontPicker({ value, templateFont, templateWeight, onChange, defaultLabel = "Police du template" }: Props) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<GoogleFont["c"] | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -50,7 +51,7 @@ export default function FontPicker({ value, templateFont, templateWeight, onChan
           onClick={() => onChange(undefined)}
           className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm hover:bg-white/10 ${!value ? "bg-white/10" : ""}`}
         >
-          <span>Police du template</span>
+          <span>{defaultLabel}</span>
           <span className="text-[11px] text-white/40">{templateFont}</span>
         </button>
         {results.map((f) => (
