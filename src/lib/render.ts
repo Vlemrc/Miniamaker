@@ -133,13 +133,21 @@ function layout(ctx: CanvasRenderingContext2D, s: Scene, fonts: Fonts): Placed[]
     const size = Math.min(typo.size, fitSize);
     placed.push({ index, line, typo, size, pad, ...measure(ctx, line, typo, size, fonts), h: size * typo.lineHeight });
   }
-  // Trop haut au total : on réduit tout proportionnellement.
-  const total = placed.reduce((sum, p) => sum + p.h, 0);
-  if (total > t.maxHeight) {
-    const k = t.maxHeight / total;
-    return placed.map((p) => ({ ...p, ...measure(ctx, p.line, p.typo, p.size * k, fonts), size: p.size * k, h: p.h * k }));
+  // Trop haut au total : on réduit tout proportionnellement (sauf l'étiquette de tête, qui garde sa taille).
+  const head = pinnedLabel(placed) ? placed[0].h : 0;
+  const total = placed.reduce((sum, p) => sum + p.h, 0) - head;
+  if (total > t.maxHeight - head) {
+    const k = Math.max(0, t.maxHeight - head) / total;
+    return placed.map((p, i) => (head && i === 0 ? p : { ...p, ...measure(ctx, p.line, p.typo, p.size * k, fonts), size: p.size * k, h: p.h * k }));
   }
   return placed;
+}
+
+// Une étiquette en première ligne annonce le format (« Avis tranché »…) : elle reste calée
+// en haut de la zone de texte, quelle que soit la longueur du texte en dessous, pour que
+// toutes les minis d'un même format l'aient à la même hauteur.
+function pinnedLabel(placed: Placed[]) {
+  return placed.length > 0 && placed[0].line.style === "label";
 }
 
 function lineX(t: Template, align: Align, w: number) {
@@ -189,7 +197,7 @@ export function linePositions(ctx: CanvasRenderingContext2D, s: Scene, fonts: Fo
   const t = s.template;
   const placed = layout(ctx, s, fonts);
   const height = placed.reduce((sum, p) => sum + p.h, 0);
-  let top = t.anchor === "bottom" ? t.anchorY - height : t.anchor === "center" ? t.anchorY - height / 2 : t.anchorY;
+  let top = pinnedLabel(placed) ? zoneRect(t).y : t.anchor === "bottom" ? t.anchorY - height : t.anchor === "center" ? t.anchorY - height / 2 : t.anchorY;
   return placed.map((p) => {
     const base = top;
     top += p.h;
