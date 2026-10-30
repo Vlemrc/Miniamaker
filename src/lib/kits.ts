@@ -1,4 +1,5 @@
 import { CONCEPTS, type Concept } from "./concepts";
+import type { Crop } from "./render";
 import { PALETTES, TEMPLATES, type Align, type Line, type Palette, type Template } from "./templates";
 
 // Un kit de marque = tout ce qui fait le style d'un client : ses templates, ses couleurs, ses concepts.
@@ -10,7 +11,7 @@ export type Kit = {
   concepts: Concept[];
 };
 
-// Ce qui était à l'écran à la dernière visite (l'image n'est pas gardée : trop lourde).
+// Ce qui était à l'écran à la dernière visite (l'image, trop lourde, est gardée à part : voir media.ts).
 export type Draft = {
   kitId: string;
   lines: Line[];
@@ -20,6 +21,11 @@ export type Draft = {
   shade: boolean;
   boost: boolean;
   conceptId: string | null;
+  // Absents des brouillons enregistrés avant leur ajout.
+  crop?: Crop;
+  gridTop?: number;
+  showGrid?: boolean;
+  depth?: boolean;
 };
 
 // Une mini exportée : vignette + réglages, pour la retrouver et repartir de son texte.

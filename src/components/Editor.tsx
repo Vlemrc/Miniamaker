@@ -6,13 +6,16 @@ import TemplateEditor from "@/components/TemplateEditor";
 import { FONT_ROLE_NAME, anton, instrumentSerif, interTight } from "@/lib/fonts";
 import { GOOGLE_FONTS, loadGoogleFont } from "@/lib/googleFonts";
 import { frameTimes, grabFull, grabThumb, loadImage, loadVideo } from "@/lib/frames";
-import { clampCrop, drawGridOverlay, drawZoneOverlay, render, linePositions, zoneRect, renderMaskEditor, toSourcePoint, type Crop, type Fonts, type Scene, type Source } from "@/lib/render";
+import { GRID_H, clampCrop, clampGridTop, drawGridOverlay, gridHit, drawZoneOverlay, render, linePositions, zoneRect, renderMaskEditor, toSourcePoint, type Crop, type Fonts, type Scene, type Source } from "@/lib/render";
 import type { Concept } from "@/lib/concepts";
 import { HISTORY_MAX, cleanLines, demoKit, storage, uid, type HistoryItem, type Kit } from "@/lib/kits";
+import { blobToSource, loadMedia, saveMedia, sourceToBlob, updateMedia, type SavedMedia } from "@/lib/media";
 import { cutout } from "@/lib/segment";
+import { StretchSwitch } from "@/components/ui/stretch-switch";
+import { IOSSpinner } from "@/components/amicro/ios-spinner";
 import { detectSubtitles, emptyMask, inpaint, preloadInpainting } from "@/lib/subtitles";
 import { FLAG_LABEL, analyze, preloadDetector, rank, type Analysis, type Scored } from "@/lib/scoring";
-import { DEFAULT_LINES, H, LINE_STYLE_LABEL, PALETTES, TEMPLATES, W, type Align, type Line, type LineStyle, type Palette, type Template } from "@/lib/templates";
+import { DEFAULT_LINES, H, LINE_STYLE_LABEL, PALETTES, SAFE, TEMPLATES, W, type Align, type Line, type LineStyle, type Palette, type Template } from "@/lib/templates";
 
 const FRAME_COUNT = 24;
 const NO_CROP: Crop = { zoom: 1, offX: 0, offY: 0 };
@@ -33,10 +36,14 @@ export default function Editor() {
     | { kind: "image"; x: number; y: number; crop: Crop }
     | { kind: "line"; index: number; y: number; dy: number; min: number; max: number }
     | { kind: "zone"; mode: ZoneMode; x: number; y: number; t: Template }
+    | { kind: "grid"; y: number; top: number }
     | null
   >(null);
+  // Clic maintenu dans la bande 3:4 : si le pointeur reste immobile un instant, on déplace la bande.
+  const hold = useRef<{ timer: number; x: number; y: number; top: number } | null>(null);
   const lastPaint = useRef<{ x: number; y: number } | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
   const [stage, setStage] = useState({ w: 0, h: 0 });
 
   const [source, setSource] = useState<Source | null>(null);
@@ -47,6 +54,12 @@ export default function Editor() {
   const [showRejected, setShowRejected] = useState(false);
   const [error, setError] = useState("");
   const [dragOver, setDragOver] = useState(false);
+  // Parcours : d'abord on choisit l'image (cadre de la vidéo, sous-titres), puis on fait la mini.
+  const [phase, setPhase] = useState<"image" | "design">("image");
+  // Le temps de vérifier s'il y a un média de la dernière visite (évite un flash de l'accueil).
+  const [restoring, setRestoring] = useState(true);
+  // Tant qu'aucun média n'est chargé, on n'affiche que l'accueil (pas d'aperçu ni de panneau).
+  const started = fileName !== "" && !error;
 
   const [lines, setLines] = useState<Line[]>(DEFAULT_LINES);
   const [templateId, setTemplateId] = useState(TEMPLATES[0].id);
@@ -56,6 +69,9 @@ export default function Editor() {
   const [shade, setShade] = useState(true);
   const [boost, setBoost] = useState(true);
   const [showGrid, setShowGrid] = useState(true);
+  const [gridTop, setGridTop] = useState(SAFE.gridTop);
+  const [overGrid, setOverGrid] = useState(false);
+  const [holdingGrid, setHoldingGrid] = useState(false);
   const [fontLine, setFontLine] = useState<number | null>(null);
   const [fontsTick, setFontsTick] = useState(0);
   const [overText, setOverText] = useState(false);
@@ -94,8 +110,8 @@ export default function Editor() {
   const effectiveAlign = template.aligns.includes(align) ? align : template.aligns[0];
 
   const scene: Scene = useMemo(
-    () => ({ source: shown, subject: cut, crop, template, palette, align: effectiveAlign, lines, shade, boost }),
-    [shown, cut, crop, template, palette, effectiveAlign, lines, shade, boost],
+    () => ({ source: shown, subject: cut, crop, template, palette, align: effectiveAlign, lines, shade, boost, gridTop }),
+    [shown, cut, crop, template, palette, effectiveAlign, lines, shade, boost, gridTop],
   );
 
   useEffect(() => {
@@ -115,9 +131,9 @@ export default function Editor() {
       return;
     }
     render(ctx, scene, fonts);
-    if (showGrid) drawGridOverlay(ctx);
+    if (showGrid) drawGridOverlay(ctx, gridTop);
     if (editingTemplate) drawZoneOverlay(ctx, template);
-  }, [scene, showGrid, fonts, fontsReady, editingMask, source, crop, maskTick, fontsTick, editingTemplate, template]);
+  }, [started, scene, showGrid, gridTop, fonts, fontsReady, editingMask, source, crop, maskTick, fontsTick, editingTemplate, template]);
 
   // Google Fonts choisies sur les lignes ou dans le template : chargées à la demande, puis on redessine.
   const lineFonts = JSON.stringify([
@@ -166,6 +182,10 @@ export default function Editor() {
       setShade(d.shade);
       setBoost(d.boost);
       setConceptId(d.conceptId);
+      if (d.crop) setCrop(d.crop);
+      if (d.gridTop !== undefined) setGridTop(d.gridTop);
+      if (d.showGrid !== undefined) setShowGrid(d.showGrid);
+      if (d.depth !== undefined) setDepth(d.depth);
     }
     setHistory(storage.loadHistory() ?? []);
     setLoaded(true);
@@ -178,11 +198,11 @@ export default function Editor() {
   useEffect(() => {
     if (!loaded) return;
     const id = setTimeout(
-      () => storage.saveDraft({ kitId, lines, templateId, align, palette, shade, boost, conceptId }),
+      () => storage.saveDraft({ kitId, lines, templateId, align, palette, shade, boost, conceptId, crop, gridTop, showGrid, depth }),
       300,
     );
     return () => clearTimeout(id);
-  }, [loaded, kitId, lines, templateId, align, palette, shade, boost, conceptId]);
+  }, [loaded, kitId, lines, templateId, align, palette, shade, boost, conceptId, crop, gridTop, showGrid, depth]);
 
   useEffect(() => {
     if (loaded) storage.saveHistory(history);
@@ -301,6 +321,11 @@ export default function Editor() {
     };
   }, [depth, shown]);
 
+  // Nouvelle étape : on repart du haut du panneau.
+  useEffect(() => {
+    panelRef.current?.scrollTo({ top: 0 });
+  }, [phase]);
+
   // Taille d'affichage de l'aperçu : la plus grande possible en 9:16 dans l'espace dispo.
   useEffect(() => {
     const el = stageRef.current;
@@ -312,7 +337,7 @@ export default function Editor() {
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [started]);
 
   const enqueue = useCallback(<T,>(fn: () => Promise<T>): Promise<T> => {
     const next = queue.current.then(fn, fn);
@@ -325,6 +350,7 @@ export default function Editor() {
       const v = videoRef.current;
       if (!v) return;
       setPickedT(t);
+      updateMedia({ pickedT: t, cleaned: null });
       const src = await enqueue(() => grabFull(v, t));
       setSource(src);
       setCrop((c) => clampCrop(src, c));
@@ -332,27 +358,48 @@ export default function Editor() {
     [enqueue],
   );
 
+  // `saved` : on rouvre le média de la dernière visite, sans refaire l'analyse ni perdre le cadrage.
   const handleFile = useCallback(
-    async (file: File) => {
+    async (file: File, saved?: SavedMedia) => {
       const id = ++loadId.current;
       setError("");
       setFrames([]);
       setPickedT(null);
       setProgress(null);
-      setCrop(NO_CROP);
       setFileName(file.name);
+      setPhase(saved ? "design" : "image");
       if (videoRef.current) URL.revokeObjectURL(videoRef.current.src);
       videoRef.current = null;
+      if (!saved) {
+        setCrop(NO_CROP);
+        saveMedia({ file, frames: [], pickedT: null, cleaned: null });
+      }
+      const restoreCleaned = async (src: Source) => {
+        if (saved?.cleaned && id === loadId.current) setCleaned({ of: src, img: await blobToSource(saved.cleaned) });
+      };
 
       try {
         if (file.type.startsWith("image/")) {
-          setSource(await loadImage(file));
+          const src = await loadImage(file);
+          setSource(src);
+          await restoreCleaned(src);
           return;
         }
         const v = await loadVideo(file);
         if (id !== loadId.current) return;
         videoRef.current = v;
         setSource(null);
+
+        if (saved && saved.frames.length === FRAME_COUNT) {
+          setFrames(saved.frames);
+          const t = saved.pickedT ?? saved.frames.reduce((a, b) => (b.score > a.score ? b : a)).t;
+          setPickedT(t);
+          const src = await enqueue(() => grabFull(v, t));
+          if (id !== loadId.current) return;
+          setSource(src);
+          await restoreCleaned(src);
+          return;
+        }
 
         const times = frameTimes(v.duration, FRAME_COUNT);
         const raw: { t: number; thumb: string; a: Analysis }[] = [];
@@ -369,6 +416,7 @@ export default function Editor() {
         }
         setProgress(null);
         const scored = rank(raw.map((r) => r.a));
+        updateMedia({ frames: raw.map((r, j) => ({ ...scored[j], t: r.t, thumb: r.thumb })) });
         const best = raw[scored.indexOf(scored.reduce((a, b) => (b.score > a.score ? b : a)))];
         await pickFrame(best.t);
       } catch (e) {
@@ -379,7 +427,17 @@ export default function Editor() {
     [enqueue, pickFrame],
   );
 
-  const step = (frames.length > 0 || progress ? 3 : 2) + (source ? 1 : 0);
+  // Au premier affichage : on rouvre la vidéo ou l'image de la dernière visite.
+  useEffect(() => {
+    const id = loadId.current;
+    loadMedia()
+      .then((m) => {
+        if (m && id === loadId.current) handleFile(m.file, m);
+      })
+      .finally(() => setRestoring(false));
+  }, [handleFile]);
+
+  const hasFrames = frames.length > 0 || !!progress;
   const sorted = useMemo(() => [...frames].sort((a, b) => b.score - a.score), [frames]);
   const good = sorted.filter((f) => f.flags.length === 0);
   const rejected = sorted.filter((f) => f.flags.length > 0);
@@ -445,6 +503,7 @@ export default function Editor() {
       const img = await inpaint(source, editingMask);
       setCleaned({ of: source, img });
       setMaskEdit(null);
+      sourceToBlob(img).then((b) => updateMedia({ cleaned: b }));
     } catch (e) {
       console.warn(e);
       setCleanError("Effacement impossible (modèle non chargé, connexion ?).");
@@ -501,6 +560,24 @@ export default function Editor() {
     return "move";
   }
 
+  function gridHitAt(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (!showGrid) return false;
+    const r = e.currentTarget.getBoundingClientRect();
+    return gridHit(gridTop, ((e.clientY - r.top) * H) / r.height);
+  }
+
+  function insideGrid(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (!showGrid) return false;
+    const r = e.currentTarget.getBoundingClientRect();
+    const y = ((e.clientY - r.top) * H) / r.height;
+    return y >= gridTop && y <= gridTop + GRID_H;
+  }
+
+  function cancelHold() {
+    if (hold.current) clearTimeout(hold.current.timer);
+    hold.current = null;
+  }
+
   function onPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
     if (editingMask) {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -515,6 +592,23 @@ export default function Editor() {
         drag.current = { kind: "zone", mode, x: e.clientX, y: e.clientY, t: template };
         return;
       }
+    }
+    if (gridHitAt(e)) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      drag.current = { kind: "grid", y: e.clientY, top: gridTop };
+      return;
+    }
+    if (insideGrid(e)) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      const h = { x: e.clientX, y: e.clientY, top: gridTop };
+      hold.current = {
+        ...h,
+        timer: window.setTimeout(() => {
+          hold.current = null;
+          drag.current = { kind: "grid", y: h.y, top: h.top };
+          setHoldingGrid(true);
+        }, 300),
+      };
     }
     const hit = textHit(e);
     if (hit) {
@@ -531,13 +625,23 @@ export default function Editor() {
       if (e.buttons) paint(e);
       return;
     }
+    // Le pointeur bouge avant la fin du clic maintenu : c'est un glisser normal (texte ou image).
+    if (hold.current && Math.hypot(e.clientX - hold.current.x, e.clientY - hold.current.y) > 6) cancelHold();
     const d = drag.current;
+    if (hold.current) return;
     if (!d) {
       setOverZone(editingTemplate ? zoneHit(e) : null);
+      setOverGrid(gridHitAt(e));
       setOverText(!editingTemplate && !!textHit(e));
       return;
     }
     const scale = W / e.currentTarget.clientWidth;
+    if (d.kind === "grid") {
+      let top = d.top + (e.clientY - d.y) * scale;
+      if (Math.abs(top - SAFE.gridTop) < 30) top = SAFE.gridTop; // aimant sur le recadrage centré
+      setGridTop(clampGridTop(top));
+      return;
+    }
     if (d.kind === "zone") {
       const dx = Math.round((e.clientX - d.x) * scale);
       const dy = Math.round((e.clientY - d.y) * scale);
@@ -564,23 +668,64 @@ export default function Editor() {
     setCrop((c) => clampCrop(source, { ...c, zoom }));
   }
 
-  return (
-    <main
-      className="flex h-screen overflow-hidden"
-      onDragOver={(e) => {
-        e.preventDefault();
-        setDragOver(true);
-      }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setDragOver(false);
-        const f = e.dataTransfer.files[0];
+  const fileInput = (
+    <input
+      ref={inputRef}
+      type="file"
+      accept="video/*,image/*"
+      hidden
+      onChange={(e) => {
+        const f = e.target.files?.[0];
         if (f) handleFile(f);
+        e.target.value = "";
       }}
-    >
+    />
+  );
+  const dropHandlers = {
+    onDragOver: (e: React.DragEvent) => {
+      e.preventDefault();
+      setDragOver(true);
+    },
+    onDragLeave: () => setDragOver(false),
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault();
+      setDragOver(false);
+      const f = e.dataTransfer.files[0];
+      if (f) handleFile(f);
+    },
+  };
+
+  // ——— Accueil : un seul geste, apporter une vidéo ou une image ———
+  if (!started) {
+    return (
+      <main className="flex h-screen items-center justify-center px-6" {...dropHandlers}>
+        {fileInput}
+        {!restoring && (
+          <div className="flex w-full max-w-md flex-col items-center text-center">
+            <h1 className="mb-2 text-2xl font-semibold tracking-tight">Miniamaker</h1>
+            <p className="mb-8 text-sm text-white/50">Des miniatures 9:16 à partir de ta vidéo, en quelques clics.</p>
+            <button
+              onClick={() => inputRef.current?.click()}
+              className={`flex w-full flex-col items-center gap-2 rounded-3xl border-2 border-dashed px-6 py-14 transition ${
+                dragOver ? "border-white/60 bg-white/10" : "border-white/20 hover:border-white/40 hover:bg-white/5"
+              }`}
+            >
+              <span className="mb-1 flex h-12 w-12 items-center justify-center rounded-full bg-white text-2xl leading-none text-black">+</span>
+              <span className="text-base font-medium">Importer une vidéo ou une image</span>
+              <span className="text-xs text-white/45">ou glisse un fichier ici</span>
+            </button>
+            {error && <p className="mt-4 w-full rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</p>}
+          </div>
+        )}
+      </main>
+    );
+  }
+
+  return (
+    <main className="flex h-screen overflow-hidden" {...dropHandlers}>
+      {fileInput}
       {/* ——— Panneau de contrôle ——— */}
-      <aside className="w-[420px] shrink-0 overflow-y-auto border-r border-white/10 bg-[#111114] px-6 py-6">
+      <aside ref={panelRef} className="w-[420px] shrink-0 overflow-y-auto border-r border-white/10 bg-[#111114] px-6 py-6">
         <div className="mb-4 flex items-baseline justify-between">
           <h1 className="text-lg font-semibold tracking-tight">Miniamaker</h1>
           <span className="text-xs text-white/40">9:16</span>
@@ -613,375 +758,407 @@ export default function Editor() {
           )}
         </div>
 
-        <Section n={1} title="Source">
-          <button
-            onClick={() => inputRef.current?.click()}
-            className="flex w-full flex-col items-center gap-1 rounded-xl border border-dashed border-white/20 px-4 py-5 text-sm transition hover:border-white/40 hover:bg-white/5"
-          >
-            <span className="font-medium">Importer une vidéo ou une image</span>
-            <span className="text-xs text-white/45">{fileName || "ou glisse un fichier n'importe où"}</span>
-          </button>
-          <input
-            ref={inputRef}
-            type="file"
-            accept="video/*,image/*"
-            hidden
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) handleFile(f);
-              e.target.value = "";
-            }}
-          />
-          {error && <p className="mt-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</p>}
-        </Section>
-
-        {(frames.length > 0 || progress) && (
-          <Section n={2} title="Choisir l'image">
-            <div className="mb-3 flex items-center justify-between text-xs text-white/50">
-              <span>
-                {progress
-                  ? `Analyse ${progress.done}/${progress.total}…`
-                  : `${good.length} bonnes images · ${rejected.length} écartées`}
-              </span>
-              {rejected.length > 0 && (
-                <button className="underline-offset-2 hover:underline" onClick={() => setShowRejected((s) => !s)}>
-                  {showRejected ? "Masquer les écartées" : "Voir les écartées"}
-                </button>
-              )}
-            </div>
-            <div className="grid grid-cols-4 gap-2">
-              {visible.map((f) => (
-                <button
-                  key={f.t}
-                  onClick={() => pickFrame(f.t)}
-                  title={`${f.t.toFixed(1)} s`}
-                  className={`relative aspect-[9/16] overflow-hidden rounded-lg ring-2 transition ${
-                    pickedT === f.t ? "ring-white" : "ring-transparent hover:ring-white/40"
-                  } ${f.flags.length ? "opacity-60" : ""}`}
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={f.thumb} alt="" className="h-full w-full object-cover" />
-                  {f.flags.length > 0 && (
-                    <span className="absolute inset-x-1 bottom-1 truncate rounded bg-black/75 px-1 py-0.5 text-[10px] leading-tight text-red-300">
-                      {FLAG_LABEL[f.flags[0]]}
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
-          </Section>
-        )}
-
-        {source && (
-          <Section n={step - 1} title="Sous-titres incrustés">
-            {editingMask ? (
-              <>
-                <p className="mb-3 text-xs text-white/50">
-                  En rouge : ce qui va être effacé. Corrige au pinceau dans l&apos;aperçu si besoin.
-                </p>
-                <div className="mb-3 flex items-center gap-2">
-                  <div className="flex rounded-lg bg-white/5 p-1 text-xs">
-                    {[
-                      { erase: false, label: "Ajouter" },
-                      { erase: true, label: "Gommer" },
-                    ].map((m) => (
-                      <button
-                        key={m.label}
-                        onClick={() => setBrush((b) => ({ ...b, erase: m.erase }))}
-                        className={`rounded-md px-3 py-1.5 transition ${brush.erase === m.erase ? "bg-white/15" : "text-white/50 hover:text-white"}`}
-                      >
-                        {m.label}
-                      </button>
-                    ))}
-                  </div>
-                  <input
-                    type="range"
-                    min={8}
-                    max={120}
-                    value={brush.size}
-                    onChange={(e) => setBrush((b) => ({ ...b, size: +e.target.value }))}
-                    className="flex-1 accent-white"
-                    title="Taille du pinceau"
-                  />
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={runCleaning}
-                    disabled={cleaning}
-                    className="flex-1 rounded-lg bg-white py-2 text-xs font-semibold text-black hover:bg-white/90 disabled:opacity-50"
-                  >
-                    {cleaning ? "Effacement…" : "Effacer"}
-                  </button>
-                  <button
-                    onClick={() => {
-                      setMaskEdit({ of: source, canvas: emptyMask(source) });
-                    }}
-                    className="rounded-lg border border-white/15 px-3 py-2 text-xs hover:bg-white/5"
-                  >
-                    Vider
-                  </button>
-                  <button onClick={() => setMaskEdit(null)} className="rounded-lg px-3 py-2 text-xs text-white/50 hover:text-white">
-                    Annuler
-                  </button>
-                </div>
-              </>
-            ) : (
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={startCleaning}
-                  className="flex-1 rounded-lg border border-white/15 py-2 text-xs font-medium hover:bg-white/5"
-                >
-                  {cleaned?.of === source ? "Retoucher l'effacement" : "Effacer les sous-titres"}
-                </button>
-                {cleaned?.of === source && (
-                  <button onClick={() => setCleaned(null)} className="text-xs text-white/50 hover:text-white">
-                    Image d&apos;origine
-                  </button>
-                )}
-              </div>
-            )}
-            {cleanError && <p className="mt-2 text-xs text-red-300">{cleanError}</p>}
-          </Section>
-        )}
-
-        <Section n={step} title="Concept">
-          <div className="flex flex-wrap gap-1.5">
-            {kit.concepts.map((c) => (
-              <span key={c.id} className="group relative">
-                <button
-                  onClick={() => applyConcept(c)}
-                  className={`rounded-full border px-3 py-1.5 text-xs transition ${
-                    c.id === conceptId ? "border-white bg-white text-black" : "border-white/10 text-white/70 hover:border-white/30 hover:text-white"
-                  }`}
-                >
-                  {c.name}
-                </button>
-                <button
-                  onClick={() => deleteConcept(c)}
-                  title="Supprimer le concept"
-                  className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-neutral-700 text-[10px] leading-none text-white group-hover:flex"
-                >
-                  ×
-                </button>
-              </span>
-            ))}
+        {/* Étapes */}
+        <div className="mb-6 flex rounded-xl bg-white/5 p-1 text-xs">
+          {[
+            { id: "image" as const, label: hasFrames ? "1 · Choisir l'image" : "1 · Image" },
+            { id: "design" as const, label: "2 · Texte et style" },
+          ].map((p) => (
             <button
-              onClick={saveConcept}
-              title="Enregistre le texte, les styles et le template actuels comme concept du kit"
-              className="rounded-full border border-dashed border-white/20 px-3 py-1.5 text-xs text-white/50 hover:border-white/40 hover:text-white"
+              key={p.id}
+              onClick={() => setPhase(p.id)}
+              disabled={p.id === "design" && !source}
+              className={`flex-1 rounded-lg py-2 font-medium transition disabled:opacity-30 ${
+                phase === p.id ? "bg-white/15 text-white" : "text-white/50 hover:text-white"
+              }`}
             >
-              + Enregistrer l&apos;actuel
+              {p.label}
             </button>
-          </div>
-          <p className="mt-2 text-xs text-white/40">Applique une structure de texte et un template. Ton texte est conservé.</p>
-        </Section>
+          ))}
+        </div>
 
-        <Section n={step + 1} title="Texte">
-          <div className="space-y-2">
-            {lines.map((line, i) => (
-              <div key={i} className="rounded-lg border border-white/10 bg-white/5 p-2">
-                <input
-                  value={line.text}
-                  onChange={(e) => updateLine(i, { text: e.target.value })}
-                  placeholder={line.hint ?? "Texte de la ligne"}
-                  className="mb-2 w-full bg-transparent px-1 text-sm outline-none placeholder:text-white/30"
-                />
-                <div className="flex items-center gap-1">
-                  {(Object.keys(LINE_STYLE_LABEL) as LineStyle[]).map((st) => (
+        {phase === "image" && (
+          <>
+            <div className="mb-7 flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5">
+              <span className="min-w-0 flex-1 truncate text-sm text-white/70" title={fileName}>
+                {fileName}
+              </span>
+              <button onClick={() => inputRef.current?.click()} className="shrink-0 text-xs text-white/50 hover:text-white">
+                Changer
+              </button>
+            </div>
+
+            {hasFrames && (
+              <Section n={1} title="Choisir l'image">
+                <div className="mb-3 flex items-center justify-between text-xs text-white/50">
+                  <span className="flex items-center gap-2">
+                    {progress && <IOSSpinner className="h-3.5 w-3.5" />}
+                    {progress
+                      ? `Analyse ${progress.done}/${progress.total}…`
+                      : `${good.length} bonnes images · ${rejected.length} écartées`}
+                  </span>
+                  {rejected.length > 0 && (
+                    <button className="underline-offset-2 hover:underline" onClick={() => setShowRejected((s) => !s)}>
+                      {showRejected ? "Masquer les écartées" : "Voir les écartées"}
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-4 gap-2">
+                  {visible.map((f) => (
                     <button
-                      key={st}
-                      onClick={() => updateLine(i, { style: st })}
-                      className={`rounded-md px-1.5 py-1 text-[11px] transition ${
-                        line.style === st ? "bg-white/20 text-white" : "text-white/45 hover:text-white"
-                      }`}
+                      key={f.t}
+                      onClick={() => pickFrame(f.t)}
+                      title={`${f.t.toFixed(1)} s`}
+                      className={`relative aspect-[9/16] overflow-hidden rounded-lg ring-2 transition ${
+                        pickedT === f.t ? "ring-white" : "ring-transparent hover:ring-white/40"
+                      } ${f.flags.length ? "opacity-60" : ""}`}
                     >
-                      {LINE_STYLE_LABEL[st]}
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={f.thumb} alt="" className="h-full w-full object-cover" />
+                      {f.flags.length > 0 && (
+                        <span className="absolute inset-x-1 bottom-1 truncate rounded bg-black/75 px-1 py-0.5 text-[10px] leading-tight text-red-300">
+                          {FLAG_LABEL[f.flags[0]]}
+                        </span>
+                      )}
                     </button>
                   ))}
-                  <button
-                    onClick={() => updateLine(i, { accent: !line.accent })}
-                    title="Ligne en couleur"
-                    className={`ml-auto h-5 w-5 rounded-full ring-1 ring-white/30 ${line.accent ? "" : "opacity-40"}`}
-                    style={{ background: line.accent ? palette.accent : "#FFFFFF" }}
-                  />
-                  <button
-                    onClick={() => {
-                      setLines((ls) => ls.filter((_, j) => j !== i));
-                      setFontLine(null);
-                    }}
-                    title="Supprimer la ligne"
-                    className="ml-1 px-1 text-sm text-white/35 hover:text-white"
-                  >
-                    ×
-                  </button>
                 </div>
-                <LineFont
-                  line={line}
-                  templateFont={FONT_ROLE_NAME[template.styles[line.style].font]}
-                  open={fontLine === i}
-                  onToggle={() => setFontLine(fontLine === i ? null : i)}
-                  onChange={(font) => updateLine(i, { font })}
-                />
-                {fontLine === i && (
-                  <FontPicker
-                    value={line.font}
-                    templateFont={FONT_ROLE_NAME[template.styles[line.style].font]}
-                    templateWeight={template.styles[line.style].weight}
-                    onChange={(font) => {
-                      updateLine(i, { font });
-                      setFontLine(null);
-                    }}
-                  />
+              </Section>
+            )}
+
+            {source && (
+              <Section n={hasFrames ? 2 : 1} title="Sous-titres incrustés">
+                {editingMask ? (
+                  <>
+                    <p className="mb-3 text-xs text-white/50">
+                      En rouge : ce qui va être effacé. Corrige au pinceau dans l&apos;aperçu si besoin.
+                    </p>
+                    <div className="mb-3 flex items-center gap-2">
+                      <div className="flex rounded-lg bg-white/5 p-1 text-xs">
+                        {[
+                          { erase: false, label: "Ajouter" },
+                          { erase: true, label: "Gommer" },
+                        ].map((m) => (
+                          <button
+                            key={m.label}
+                            onClick={() => setBrush((b) => ({ ...b, erase: m.erase }))}
+                            className={`rounded-md px-3 py-1.5 transition ${brush.erase === m.erase ? "bg-white/15" : "text-white/50 hover:text-white"}`}
+                          >
+                            {m.label}
+                          </button>
+                        ))}
+                      </div>
+                      <input
+                        type="range"
+                        min={8}
+                        max={120}
+                        value={brush.size}
+                        onChange={(e) => setBrush((b) => ({ ...b, size: +e.target.value }))}
+                        className="flex-1 accent-white"
+                        title="Taille du pinceau"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={runCleaning}
+                        disabled={cleaning}
+                        className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-white py-2 text-xs font-semibold text-black hover:bg-white/90 disabled:opacity-50"
+                      >
+                        {cleaning && <IOSSpinner className="h-3.5 w-3.5" />}
+                        {cleaning ? "Effacement…" : "Effacer"}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setMaskEdit({ of: source, canvas: emptyMask(source) });
+                        }}
+                        className="rounded-lg border border-white/15 px-3 py-2 text-xs hover:bg-white/5"
+                      >
+                        Vider
+                      </button>
+                      <button onClick={() => setMaskEdit(null)} className="rounded-lg px-3 py-2 text-xs text-white/50 hover:text-white">
+                        Annuler
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={startCleaning}
+                      className="flex-1 rounded-lg border border-white/15 py-2 text-xs font-medium hover:bg-white/5"
+                    >
+                      {cleaned?.of === source ? "Retoucher l'effacement" : "Effacer les sous-titres"}
+                    </button>
+                    {cleaned?.of === source && (
+                      <button onClick={() => {
+                        setCleaned(null);
+                        updateMedia({ cleaned: null });
+                      }} className="text-xs text-white/50 hover:text-white">
+                        Image d&apos;origine
+                      </button>
+                    )}
+                  </div>
                 )}
-              </div>
-            ))}
-          </div>
-          {lines.length < 5 && (
+                {cleanError && <p className="mt-2 text-xs text-red-300">{cleanError}</p>}
+              </Section>
+            )}
+
             <button
-              onClick={() => setLines((ls) => [...ls, { text: "", style: "normal", accent: false }])}
-              className="mt-2 w-full rounded-lg border border-dashed border-white/15 py-2 text-xs text-white/50 hover:border-white/30 hover:text-white"
+              onClick={() => setPhase("design")}
+              disabled={!source || !!editingMask}
+              className="w-full rounded-xl bg-white py-3 text-sm font-semibold text-black transition hover:bg-white/90 disabled:opacity-30"
             >
-              + Ajouter une ligne
+              Continuer · texte et style
             </button>
-          )}
-          <p className="mt-2 text-xs text-white/40">
-            Une ligne saisie = une ligne sur la mini. Entoure un mot d&apos;astérisques pour le mettre en couleur :{" "}
-            <code className="text-white/60">*entreprise*</code>
-          </p>
-        </Section>
+          </>
+        )}
 
-        <Section n={step + 2} title="Style">
-          <div className="mb-2 grid grid-cols-2 gap-2">
-            {kit.templates.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => selectTemplate(t)}
-                title={t.description}
-                className={`truncate rounded-lg border px-2 py-2.5 text-xs transition ${
-                  t.id === template.id ? "border-white bg-white text-black" : "border-white/10 hover:border-white/30"
-                }`}
-              >
-                {t.name}
-              </button>
-            ))}
-          </div>
-          {editingTemplate ? (
-            <div className="mb-4">
-              <TemplateEditor
-                template={template}
-                onChange={updateTemplate}
-                onDuplicate={duplicateTemplate}
-                onDelete={kit.templates.length > 1 ? deleteTemplate : null}
-                onClose={() => setEditingTemplate(false)}
-              />
-            </div>
-          ) : (
-            <button
-              onClick={() => setEditingTemplate(true)}
-              className="mb-4 w-full rounded-lg border border-white/10 py-2 text-xs text-white/60 hover:border-white/30 hover:text-white"
-            >
-              Modifier le template « {template.name} »
-            </button>
-          )}
-
-          <div className="mb-4 flex rounded-lg bg-white/5 p-1">
-            {template.aligns.map((a) => (
-              <button
-                key={a}
-                onClick={() => setAlign(a)}
-                className={`flex-1 rounded-md py-1.5 text-xs transition ${a === effectiveAlign ? "bg-white/15" : "text-white/50 hover:text-white"}`}
-              >
-                {ALIGN_LABEL[a]}
-              </button>
-            ))}
-          </div>
-
-          <div className="mb-4 flex flex-wrap items-center gap-2">
-            {kit.colors.map((p) => (
-              <span key={p.id} className="group relative">
+        {phase === "design" && (
+          <>
+            <Section n={1} title="Concept">
+              <div className="flex flex-wrap gap-1.5">
+                {kit.concepts.map((c) => (
+                  <span key={c.id} className="group relative">
+                    <button
+                      onClick={() => applyConcept(c)}
+                      className={`rounded-full border px-3 py-1.5 text-xs transition ${
+                        c.id === conceptId ? "border-white bg-white text-black" : "border-white/10 text-white/70 hover:border-white/30 hover:text-white"
+                      }`}
+                    >
+                      {c.name}
+                    </button>
+                    <button
+                      onClick={() => deleteConcept(c)}
+                      title="Supprimer le concept"
+                      className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-neutral-700 text-[10px] leading-none text-white group-hover:flex"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
                 <button
-                  onClick={() => setPalette(p)}
-                  title={p.name}
-                  className={`block h-8 w-8 rounded-full ring-2 ring-offset-2 ring-offset-[#111114] transition ${
-                    palette.id === p.id ? "ring-white" : "ring-transparent"
-                  }`}
-                  style={{ background: p.accent }}
-                />
-                {kit.colors.length > 1 && (
+                  onClick={saveConcept}
+                  title="Enregistre le texte, les styles et le template actuels comme concept du kit"
+                  className="rounded-full border border-dashed border-white/20 px-3 py-1.5 text-xs text-white/50 hover:border-white/40 hover:text-white"
+                >
+                  + Enregistrer l&apos;actuel
+                </button>
+              </div>
+              <p className="mt-2 text-xs text-white/40">Applique une structure de texte et un template. Ton texte est conservé.</p>
+            </Section>
+
+            <Section n={2} title="Texte">
+              <div className="space-y-2">
+                {lines.map((line, i) => (
+                  <div key={i} className="rounded-lg border border-white/10 bg-white/5 p-2">
+                    <input
+                      value={line.text}
+                      onChange={(e) => updateLine(i, { text: e.target.value })}
+                      placeholder={line.hint ?? "Texte de la ligne"}
+                      className="mb-2 w-full bg-transparent px-1 text-sm outline-none placeholder:text-white/30"
+                    />
+                    <div className="flex items-center gap-1">
+                      {(Object.keys(LINE_STYLE_LABEL) as LineStyle[]).map((st) => (
+                        <button
+                          key={st}
+                          onClick={() => updateLine(i, { style: st })}
+                          className={`rounded-md px-1.5 py-1 text-[11px] transition ${
+                            line.style === st ? "bg-white/20 text-white" : "text-white/45 hover:text-white"
+                          }`}
+                        >
+                          {LINE_STYLE_LABEL[st]}
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => updateLine(i, { accent: !line.accent })}
+                        title="Ligne en couleur"
+                        className={`ml-auto h-5 w-5 rounded-full ring-1 ring-white/30 ${line.accent ? "" : "opacity-40"}`}
+                        style={{ background: line.accent ? palette.accent : "#FFFFFF" }}
+                      />
+                      <button
+                        onClick={() => {
+                          setLines((ls) => ls.filter((_, j) => j !== i));
+                          setFontLine(null);
+                        }}
+                        title="Supprimer la ligne"
+                        className="ml-1 px-1 text-sm text-white/35 hover:text-white"
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <LineFont
+                      line={line}
+                      templateFont={FONT_ROLE_NAME[template.styles[line.style].font]}
+                      open={fontLine === i}
+                      onToggle={() => setFontLine(fontLine === i ? null : i)}
+                      onChange={(font) => updateLine(i, { font })}
+                    />
+                    {fontLine === i && (
+                      <FontPicker
+                        value={line.font}
+                        templateFont={FONT_ROLE_NAME[template.styles[line.style].font]}
+                        templateWeight={template.styles[line.style].weight}
+                        onChange={(font) => {
+                          updateLine(i, { font });
+                          setFontLine(null);
+                        }}
+                      />
+                    )}
+                  </div>
+                ))}
+              </div>
+              {lines.length < 5 && (
+                <button
+                  onClick={() => setLines((ls) => [...ls, { text: "", style: "normal", accent: false }])}
+                  className="mt-2 w-full rounded-lg border border-dashed border-white/15 py-2 text-xs text-white/50 hover:border-white/30 hover:text-white"
+                >
+                  + Ajouter une ligne
+                </button>
+              )}
+              <p className="mt-2 text-xs text-white/40">
+                Une ligne saisie = une ligne sur la mini. Entoure un mot d&apos;astérisques pour le mettre en couleur :{" "}
+                <code className="text-white/60">*entreprise*</code>
+              </p>
+            </Section>
+
+            <Section n={3} title="Style">
+              <div className="mb-2 grid grid-cols-2 gap-2">
+                {kit.templates.map((t) => (
                   <button
-                    onClick={() => deleteColor(p)}
-                    title="Retirer la couleur du kit"
-                    className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 items-center justify-center rounded-full bg-neutral-700 text-[10px] leading-none text-white group-hover:flex"
+                    key={t.id}
+                    onClick={() => selectTemplate(t)}
+                    title={t.description}
+                    className={`truncate rounded-lg border px-2 py-2.5 text-xs transition ${
+                      t.id === template.id ? "border-white bg-white text-black" : "border-white/10 hover:border-white/30"
+                    }`}
                   >
-                    ×
+                    {t.name}
                   </button>
+                ))}
+              </div>
+              {editingTemplate ? (
+                <div className="mb-4">
+                  <TemplateEditor
+                    template={template}
+                    onChange={updateTemplate}
+                    onDuplicate={duplicateTemplate}
+                    onDelete={kit.templates.length > 1 ? deleteTemplate : null}
+                    onClose={() => setEditingTemplate(false)}
+                  />
+                </div>
+              ) : (
+                <button
+                  onClick={() => setEditingTemplate(true)}
+                  className="mb-4 w-full rounded-lg border border-white/10 py-2 text-xs text-white/60 hover:border-white/30 hover:text-white"
+                >
+                  Modifier le template « {template.name} »
+                </button>
+              )}
+
+              <div className="mb-4 flex rounded-lg bg-white/5 p-1">
+                {template.aligns.map((a) => (
+                  <button
+                    key={a}
+                    onClick={() => setAlign(a)}
+                    className={`flex-1 rounded-md py-1.5 text-xs transition ${a === effectiveAlign ? "bg-white/15" : "text-white/50 hover:text-white"}`}
+                  >
+                    {ALIGN_LABEL[a]}
+                  </button>
+                ))}
+              </div>
+
+              <div className="mb-4 flex flex-wrap items-center gap-2">
+                {kit.colors.map((p) => (
+                  <span key={p.id} className="group relative">
+                    <button
+                      onClick={() => setPalette(p)}
+                      title={p.name}
+                      className={`block h-8 w-8 rounded-full ring-2 ring-offset-2 ring-offset-[#111114] transition ${
+                        palette.id === p.id ? "ring-white" : "ring-transparent"
+                      }`}
+                      style={{ background: p.accent }}
+                    />
+                    {kit.colors.length > 1 && (
+                      <button
+                        onClick={() => deleteColor(p)}
+                        title="Retirer la couleur du kit"
+                        className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 items-center justify-center rounded-full bg-neutral-700 text-[10px] leading-none text-white group-hover:flex"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </span>
+                ))}
+                <ColorAdder onAdd={addColor} />
+              </div>
+
+              <div className="space-y-2">
+                <Toggle label="Détourer la personne (texte derrière)" on={depth} set={setDepth} />
+                {segmenting && (
+                  <p className="flex items-center gap-2 text-xs text-white/45">
+                    <IOSSpinner className="h-3.5 w-3.5" />
+                    Détourage en cours…
+                  </p>
                 )}
-              </span>
-            ))}
-            <ColorAdder onAdd={addColor} />
-          </div>
+                {depth && segError && <p className="text-xs text-red-300">{segError}</p>}
+                <Toggle label="Dégradé derrière le texte" on={shade} set={setShade} />
+                <Toggle label="Booster l'image (contraste, couleurs)" on={boost} set={setBoost} />
+              </div>
+            </Section>
 
-          <div className="space-y-2">
-            <Toggle label="Détourer la personne (texte derrière)" on={depth} set={setDepth} />
-            {segmenting && <p className="text-xs text-white/45">Détourage en cours…</p>}
-            {depth && segError && <p className="text-xs text-red-300">{segError}</p>}
-            <Toggle label="Dégradé derrière le texte" on={shade} set={setShade} />
-            <Toggle label="Booster l'image (contraste, couleurs)" on={boost} set={setBoost} />
-          </div>
-        </Section>
+            <Section n={4} title="Cadrage">
+              <div className="flex items-center gap-3">
+                <input
+                  type="range"
+                  min={1}
+                  max={2.5}
+                  step={0.01}
+                  value={crop.zoom}
+                  onChange={(e) => setZoom(+e.target.value)}
+                  className="flex-1 accent-white"
+                  disabled={!source}
+                />
+                <button
+                  className="text-xs text-white/50 hover:text-white"
+                  onClick={() => {
+                    setCrop(NO_CROP);
+                    resetLinePositions();
+                  }}
+                >
+                  Réinitialiser
+                </button>
+              </div>
+              <p className="mt-1.5 text-xs text-white/40">
+                Dans l&apos;aperçu : glisse une ligne de texte pour la monter ou la descendre, glisse l&apos;image pour la recadrer.
+              </p>
+            </Section>
 
-        <Section n={step + 3} title="Cadrage">
-          <div className="flex items-center gap-3">
-            <input
-              type="range"
-              min={1}
-              max={2.5}
-              step={0.01}
-              value={crop.zoom}
-              onChange={(e) => setZoom(+e.target.value)}
-              className="flex-1 accent-white"
-              disabled={!source}
-            />
-            <button
-              className="text-xs text-white/50 hover:text-white"
-              onClick={() => {
-                setCrop(NO_CROP);
-                resetLinePositions();
-              }}
-            >
-              Réinitialiser
-            </button>
-          </div>
-          <p className="mt-1.5 text-xs text-white/40">
-            Dans l&apos;aperçu : glisse une ligne de texte pour la monter ou la descendre, glisse l&apos;image pour la recadrer.
-          </p>
-        </Section>
-
-        {history.length > 0 && (
-          <Section n={step + 4} title="Dernières minis">
-            <div className="grid grid-cols-4 gap-2">
-              {history.map((h) => (
-                <span key={h.id} className="group relative">
-                  <button
-                    onClick={() => restoreFromHistory(h)}
-                    title={`Reprendre ce texte et ces réglages · ${new Date(h.date).toLocaleString("fr-FR")}`}
-                    className="block aspect-[9/16] w-full overflow-hidden rounded-lg ring-2 ring-transparent transition hover:ring-white/40"
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={h.thumb} alt="" className="h-full w-full object-cover" />
-                  </button>
-                  <button
-                    onClick={() => setHistory((hs) => hs.filter((x) => x.id !== h.id))}
-                    title="Retirer de l'historique"
-                    className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 items-center justify-center rounded-full bg-neutral-700 text-[10px] leading-none text-white group-hover:flex"
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-            </div>
-            <p className="mt-2 text-xs text-white/40">Clique sur une mini pour reprendre son texte et ses réglages (pas l&apos;image).</p>
-          </Section>
+            {history.length > 0 && (
+              <Section n={5} title="Dernières minis">
+                <div className="grid grid-cols-4 gap-2">
+                  {history.map((h) => (
+                    <span key={h.id} className="group relative">
+                      <button
+                        onClick={() => restoreFromHistory(h)}
+                        title={`Reprendre ce texte et ces réglages · ${new Date(h.date).toLocaleString("fr-FR")}`}
+                        className="block aspect-[9/16] w-full overflow-hidden rounded-lg ring-2 ring-transparent transition hover:ring-white/40"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={h.thumb} alt="" className="h-full w-full object-cover" />
+                      </button>
+                      <button
+                        onClick={() => setHistory((hs) => hs.filter((x) => x.id !== h.id))}
+                        title="Retirer de l'historique"
+                        className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 items-center justify-center rounded-full bg-neutral-700 text-[10px] leading-none text-white group-hover:flex"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs text-white/40">Clique sur une mini pour reprendre son texte et ses réglages (pas l&apos;image).</p>
+              </Section>
+            )}
+          </>
         )}
       </aside>
 
@@ -1014,6 +1191,8 @@ export default function Editor() {
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={() => {
+              cancelHold();
+              setHoldingGrid(false);
               drag.current = null;
               lastPaint.current = null;
             }}
@@ -1022,19 +1201,22 @@ export default function Editor() {
             onPointerLeave={() => {
               setOverText(false);
               setOverZone(null);
+              setOverGrid(false);
             }}
             className={`rounded-2xl shadow-2xl shadow-black/60 ${
               editingMask
                 ? "cursor-crosshair"
-                : overZone === "move"
-                  ? "cursor-move"
-                  : overZone
-                    ? "cursor-ew-resize"
-                    : overText
-                      ? "cursor-ns-resize"
-                      : source
-                        ? "cursor-grab active:cursor-grabbing"
-                        : ""
+                : holdingGrid
+                  ? "cursor-grabbing"
+                    : overZone === "move"
+                    ? "cursor-move"
+                    : overZone
+                      ? "cursor-ew-resize"
+                      : overGrid || overText
+                        ? "cursor-ns-resize"
+                        : source
+                          ? "cursor-grab active:cursor-grabbing"
+                          : ""
             }`}
           />
         </div>
@@ -1151,14 +1333,7 @@ function Section({ n, title, children }: { n: number; title: string; children: R
 }
 
 function Toggle({ label, on, set }: { label: string; on: boolean; set: (v: boolean) => void }) {
-  return (
-    <button onClick={() => set(!on)} className="flex w-full items-center justify-between text-sm text-white/80">
-      {label}
-      <span className={`relative h-5 w-9 rounded-full transition ${on ? "bg-white" : "bg-white/15"}`}>
-        <span className={`absolute top-0.5 h-4 w-4 rounded-full transition-all ${on ? "left-[18px] bg-black" : "left-0.5 bg-white/70"}`} />
-      </span>
-    </button>
-  );
+  return <StretchSwitch checked={on} onChange={set} label={<span className="text-sm font-normal text-white/80">{label}</span>} />;
 }
 
 function Chip({ on, onClick, children }: { on: boolean; onClick: () => void; children: React.ReactNode }) {

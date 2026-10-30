@@ -70,11 +70,26 @@ function sharpness(src: HTMLCanvasElement) {
   return sum2 / n - mean * mean;
 }
 
+// Le wasm MediaPipe écrit ses messages « INFO: … » sur stderr, que le navigateur reçoit en console.error
+// (et que Next affiche comme une erreur). On les écarte le temps de l'appel, le reste passe.
+function quietInfo<T>(fn: () => T): T {
+  const error = console.error;
+  console.error = (...args: unknown[]) => {
+    if (typeof args[0] === "string" && args[0].startsWith("INFO:")) return;
+    error(...args);
+  };
+  try {
+    return fn();
+  } finally {
+    console.error = error;
+  }
+}
+
 export async function analyze(c: HTMLCanvasElement): Promise<Analysis> {
   const sharp = sharpness(c);
   const lm = await getLandmarker();
   if (!lm) return { sharpness: sharp, faces: 0, blink: null, jaw: null };
-  const res = lm.detect(c);
+  const res = quietInfo(() => lm.detect(c));
   const shapes = res.faceBlendshapes?.[0]?.categories;
   if (!shapes) return { sharpness: sharp, faces: res.faceLandmarks.length, blink: null, jaw: null };
   const get = (name: string) => shapes.find((s) => s.categoryName === name)?.score ?? 0;

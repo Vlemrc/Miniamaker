@@ -14,6 +14,7 @@ export type Scene = {
   lines: Line[];
   shade: boolean;
   boost: boolean;
+  gridTop: number; // haut de la bande 3:4 visible dans la grille du profil
 };
 
 type Word = { text: string; hl: boolean; w: number };
@@ -201,8 +202,8 @@ export function linePositions(ctx: CanvasRenderingContext2D, s: Scene, fonts: Fo
   return placed.map((p) => {
     const base = top;
     top += p.h;
-    const min = SAFE.gridTop + 20 - base;
-    const max = Math.max(min, SAFE.gridBottom - 20 - p.h - base);
+    const min = s.gridTop + 20 - base;
+    const max = Math.max(min, s.gridTop + GRID_H - 20 - p.h - base);
     const dy = Math.max(min, Math.min(max, p.line.dy ?? 0));
     return { p, top: base + dy, dy, min, max };
   });
@@ -221,18 +222,31 @@ export function render(ctx: CanvasRenderingContext2D, s: Scene, fonts: Fonts) {
   if (s.subject) drawSource(ctx, s.subject, s.crop, s.boost, true);
 }
 
+// Hauteur de la bande 3:4 (pleine largeur) ; par défaut centrée, mais on peut la faire glisser.
+export const GRID_H = SAFE.gridBottom - SAFE.gridTop;
+
+export function clampGridTop(top: number) {
+  return Math.max(0, Math.min(H - GRID_H, Math.round(top)));
+}
+
+// La bande s'attrape par ses bords pointillés ou par son étiquette.
+export function gridHit(top: number, y: number) {
+  return Math.abs(y - top) < 30 || Math.abs(y - (top + GRID_H)) < 30 || (y > top && y < top + 70);
+}
+
 // Repère affiché dans l'éditeur uniquement : la partie visible dans la grille du profil (recadrage 3:4).
-export function drawGridOverlay(ctx: CanvasRenderingContext2D) {
+export function drawGridOverlay(ctx: CanvasRenderingContext2D, top: number) {
+  const bottom = top + GRID_H;
   ctx.save();
   ctx.fillStyle = "rgba(0,0,0,0.45)";
-  ctx.fillRect(0, 0, W, SAFE.gridTop);
-  ctx.fillRect(0, SAFE.gridBottom, W, H - SAFE.gridBottom);
+  ctx.fillRect(0, 0, W, top);
+  ctx.fillRect(0, bottom, W, H - bottom);
   ctx.setLineDash([18, 14]);
   ctx.strokeStyle = "rgba(255,255,255,0.8)";
   ctx.lineWidth = 3;
-  ctx.strokeRect(1.5, SAFE.gridTop, W - 3, SAFE.gridBottom - SAFE.gridTop);
+  ctx.strokeRect(1.5, top + 1.5, W - 3, GRID_H - 3);
   ctx.setLineDash([]);
-  label(ctx, "Visible dans la grille du profil (3:4)", 24, SAFE.gridTop + 16);
+  label(ctx, "Visible dans la grille du profil (3:4)", 24, top + 16);
   ctx.restore();
 }
 

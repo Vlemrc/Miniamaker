@@ -21,4 +21,18 @@ Puis ouvrir http://localhost:3000.
 - **Rendu** : `src/lib/render.ts`, canvas 1080 × 1920. La taille du titre s'ajuste toute seule à la zone.
 - **Export** : JPG ou PNG en 1080 × 1920, sans les repères (zones TikTok/Reels, grille Insta 3:4).
 
+## Composants d'interface
+
+Deux banques de composants React animés (framer-motion, licence MIT) sont branchées via le CLI shadcn (`components.json`) :
+
+- **EasyUI** (https://easyui.site) → `src/components/ui/`
+- **Amicro** (https://amicro.dev) → `src/components/amicro/`
+
+```bash
+npx shadcn@latest add Surajmaurya1/easyui/<composant>
+npx shadcn@latest add @amicro/<composant>
+```
+
+Le code est copié dans le projet et peut être retouché. Les composants EasyUI lisent les jetons `--bg`, `--text-primary`, `--border`… définis dans `src/app/globals.css`.
+
 Les wasm MediaPipe et onnxruntime sont copiés dans `public/` au `postinstall`. Le modèle de visage est chargé depuis les serveurs de Google ; sans réseau, le tri se fait seulement sur la netteté.

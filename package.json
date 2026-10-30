@@ -11,10 +11,13 @@
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.1.1",
+    "clsx": "^2.1.1",
+    "framer-motion": "^14.6.0",
     "next": "15.5.28",
     "onnxruntime-web": "^1.30.0",
     "react": "19.1.0",
-    "react-dom": "19.1.0"
+    "react-dom": "19.1.0",
+    "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
