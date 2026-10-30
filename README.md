@@ -7,7 +7,7 @@ npm install
 npm run dev
 ```
 
-Puis ouvrir http://localhost:3000.
+Puis ouvrir http://localhost:3000 : la landing page est sur `/`, la page de téléchargement sur `/download` et l'éditeur sur `/app`. Les liens des installeurs sont dans `src/lib/site.ts`.
 
 ## Fonctionnement
 
@@ -36,3 +36,17 @@ npx shadcn@latest add @amicro/<composant>
 Le code est copié dans le projet et peut être retouché. Les composants EasyUI lisent les jetons `--bg`, `--text-primary`, `--border`… définis dans `src/app/globals.css`.
 
 Les wasm MediaPipe et onnxruntime sont copiés dans `public/` au `postinstall`. Le modèle de visage est chargé depuis les serveurs de Google ; sans réseau, le tri se fait seulement sur la netteté.
+
+## App de bureau
+
+L'app de bureau (Electron, `electron/main.cjs`) affiche l'éditeur exporté en fichiers statiques. Avec `DESKTOP=1`, `next build` exporte le site dans `out/`, et la fenêtre le sert via un protocole `app://` : les chemins `/_next`, `/ort`, `/mediapipe` marchent tels quels, et le stockage local et le cache des modèles restent d'une version à l'autre.
+
+```bash
+npm run desktop       # export puis ouverture dans Electron
+npm run desktop:mac   # dist/Miniamaker.dmg (universel Apple Silicon + Intel)
+npm run desktop:win   # dist/Miniamaker-Setup.exe (x64, se construit aussi depuis un Mac)
+```
+
+Les noms des fichiers correspondent aux liens de la page `/download` (`src/lib/site.ts`) : il suffit de les joindre à une release GitHub pour que les boutons marchent.
+
+Avant de distribuer : sans certificat « Developer ID Application » et sans notarisation, macOS bloque l'app téléchargée. Sans certificat de signature, Windows affiche un avertissement SmartScreen.

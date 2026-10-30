@@ -52,3 +52,6 @@ next-env.d.ts
 
 # Config locale de l'app Claude
 /.claude
+
+# app de bureau
+/dist

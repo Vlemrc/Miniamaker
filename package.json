@@ -7,7 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "postinstall": "node scripts/copy-wasm.mjs"
+    "postinstall": "node scripts/copy-wasm.mjs",
+    "desktop": "DESKTOP=1 next build && electron .",
+    "desktop:mac": "node scripts/build-desktop.mjs --mac",
+    "desktop:win": "node scripts/build-desktop.mjs --win"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.1.1",
@@ -25,9 +28,56 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "electron": "^45.1.0",
+    "electron-builder": "^26.18.0",
     "eslint": "^9",
     "eslint-config-next": "15.5.28",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "description": "Miniatures verticales en série, toujours dans le même style.",
+  "author": "Victor Lemercier",
+  "main": "electron/main.cjs",
+  "build": {
+    "appId": "app.miniamaker",
+    "productName": "Miniamaker",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "out/**/*",
+      "!node_modules/**/*"
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "category": "public.app-category.graphics-design",
+      "artifactName": "Miniamaker.${ext}"
+    },
+    "dmg": {
+      "title": "Miniamaker"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Miniamaker-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "runAfterFinish": true
+    }
   }
 }
