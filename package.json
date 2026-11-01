@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "postinstall": "node scripts/copy-wasm.mjs",
-    "desktop": "DESKTOP=1 next build && electron .",
+    "desktop": "node scripts/build-desktop.mjs --run",
     "desktop:mac": "node scripts/build-desktop.mjs --mac",
     "desktop:win": "node scripts/build-desktop.mjs --win"
   },

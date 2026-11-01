@@ -165,6 +165,14 @@ function getSession() {
   return session;
 }
 
+// Part de l'image couverte par le masque (0 à 1) : sert à savoir s'il y a des sous-titres.
+export function maskCoverage(mask: HTMLCanvasElement) {
+  const a = mask.getContext("2d", { willReadFrequently: true })!.getImageData(0, 0, mask.width, mask.height).data;
+  let n = 0;
+  for (let i = 3; i < a.length; i += 4) if (a[i] > 127) n++;
+  return n / (mask.width * mask.height);
+}
+
 export function preloadInpainting() {
   void getSession().catch(() => undefined);
 }

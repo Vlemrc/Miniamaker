@@ -11,10 +11,16 @@ const compat = new FlatCompat({
 
 const eslintConfig = [
   ...compat.extends("next/core-web-vitals", "next/typescript"),
+  // Le processus principal d'Electron est en CommonJS.
+  { files: ["**/*.cjs"], rules: { "@typescript-eslint/no-require-imports": "off" } },
   {
     ignores: [
       "node_modules/**",
       ".next/**",
+      ".next-desktop/**",
+      "dist/**",
+      "public/mediapipe/**",
+      "public/ort/**",
       "out/**",
       "build/**",
       "next-env.d.ts",
